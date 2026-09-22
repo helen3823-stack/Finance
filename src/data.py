@@ -26,8 +26,13 @@ from .paths import DATASET as DATA
 MARKET_TZ = "America/New_York"
 CUTOFF = pd.Timedelta(hours=9, minutes=30)      # 장 시작
 
+# 기준일의 시작. 표마다 시작이 다른데(일봉·시간봉 2023-10, Reddit 2024-01,
+# 뉴스 2024-08-13) 모든 표가 갖춰진 날부터만 기준일로 씀. 그 앞의 일봉·시간봉은
+# 지표를 계산할 때 과거로 거슬러 보는 용도로만 쓰임.
+START = pd.Timestamp("2024-08-13")
+
 # 전날 종가 대비 등락률로 다섯 구간을 나눔.
-# 실제 분포는 6.6 / 23.7 / 34.5 / 27.8 / 7.4 % 정도다.
+# 기준일 구간(2024-08-13 이후)의 실제 분포는 7.4 / 24.1 / 32.9 / 27.4 / 8.3 % 임.
 RET_CUTS = (-2.5, -0.6, 0.6, 2.5)
 LABELS = ("급하락", "하락", "보합", "상승", "급상승")
 CRASH, DOWN, FLAT, UP, SURGE = 0, 1, 2, 3, 4   # schema.py 와 같은 값
@@ -79,16 +84,17 @@ def score(y_true, y_pred, ret_pct=None) -> dict:
         보합은 가치가 적음             정답이 보합인 행은 전부 0
         반대로 찍으면 크게 깎임         거리 제곱이라 멀수록 급격히 커짐
 
-    실측하면 이럼.
+    기준일 구간 전체에서 실측하면 이럼. 보합인 날은 보합으로 두고 나머지만 전략대로 찍은 값임.
 
-        급등락만 잡고 나머지 보합    +0.896
-        방향만 맞고 세기는 틀림      +0.827
-        급등락을 정반대로           -1.781
+        급등락만 잡고 나머지 보합    +0.862   정확도 0.485
+        방향만 맞고 세기는 틀림      +0.834   정확도 0.844
+        급등락을 정반대로           -1.818   정확도 0.329
 
     정확도가 높아도 급등락을 놓치면 점수가 낮음. 가중이 비대칭이라 아주 나쁜
     예측은 -1 아래로 내려갈 수 있음.
 
-    구현은 QWK(quadratic weighted kappa)에 극단 가중을 더한 형태임.
+    가중치가 (i-j)² 만인 보통의 quadratic weighted kappa 와는 다름. sklearn 의
+    cohen_kappa_score(weights="quadratic") 와 값이 일치하지 않음.
 
     Args:
         y_true: 정답 label.
@@ -206,6 +212,11 @@ class Day:
         """그 구간에 올라온 글과 댓글. 종목 구분은 없음.
 
         kind 는 posts, comments, both 중 하나임.
+
+        Reddit 에는 known_at 이 없고 올라온 시각(created_et)으로 자름. 본문은
+        올라온 직후 수집되어 cutoff 에 알 수 있는 정보가 맞음. 단 score 와
+        n_comments 는 36시간 뒤 다시 긁은 값이라 cutoff 시점에는 모르는 미래
+        정보임. feature 로 쓰지 말 것.
         """
         return self.ds.reddit(subreddit, self.start_of(days, hours, since),
                               self.cutoff, kind)
@@ -340,6 +351,9 @@ class Dataset:
 
         kind 는 posts, comments, both 중 하나임. both면 둘을 합치고 kind
         column으로 구분함.
+
+        [since, until) 은 created_et(올라온 시각) 기준임. score 와 n_comments 는
+        36시간 뒤 2차 수집값이라 그 시점에는 알 수 없는 값임.
         """
         if kind == "both":
             parts = []
@@ -410,10 +424,11 @@ class Dataset:
         return Day(self, date)
 
     def days(self, since=None, until=None):
-        """기준일 목록. 다음 거래일이 없는 마지막 날은 제외함."""
+        """기준일 목록. START(2024-08-13) 앞과 다음 거래일이 없는 마지막 날은 제외함."""
         every = self.dates()
         last = every[-1] if every else None
-        return [Day(self, d) for d in self.dates(since, until)
+        lo = START if since is None else max(_ts(since), START)
+        return [Day(self, d) for d in self.dates(lo, until)
                 if last is None or d < last]
 
     def split(self, on, *, since=None, until=None):
@@ -449,11 +464,13 @@ class Dataset:
         return sorted(self.labels().symbol.unique())
 
     def balance(self, since=None, until=None) -> pd.DataFrame:
-        v = self.labels(since, until).label.value_counts(normalize=True).sort_index()
+        """label 비율. 기본은 기준일 구간(START 이후)임."""
+        v = self.labels(START if since is None else since, until).label.value_counts(normalize=True).sort_index()
         return pd.DataFrame({"이름": LABELS, "비율%": (v * 100).round(1).values})
 
     def __repr__(self) -> str:
         lab = self.labels()
+        days = self.days()
         return (f"<Dataset {lab.symbol.nunique()}종목 "
-                f"{lab.date.min():%Y-%m-%d}~{lab.date.max():%Y-%m-%d} "
-                f"{len(lab):,}행>")
+                f"기준일 {days[0].date:%Y-%m-%d}~{days[-1].date:%Y-%m-%d} {len(days)}일 "
+                f"(일봉 {lab.date.min():%Y-%m-%d}~{lab.date.max():%Y-%m-%d})>")

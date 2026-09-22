@@ -10,4 +10,6 @@ dependencies = [
     "scikit-learn>=1.4",
     "torch>=2.0",
     "pydantic>=2.0",
+    "matplotlib>=3.8",
+    "ipykernel>=6.29",
 ]

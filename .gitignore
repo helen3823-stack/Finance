@@ -2,8 +2,6 @@ dataset/
 __pycache__/
 .vscode/
 project.md
-*.pkl
-*.pt
 *.csv
 .venv/
 .ipynb_checkpoints/

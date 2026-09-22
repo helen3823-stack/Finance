@@ -71,8 +71,9 @@ def build_features(day, lookback=LOOKBACK):
 
     x = pd.DataFrame(rows)
 
-    # 개장 전 시간외 거래에서의 등락
-    p = day.price(days=1, columns=["symbol", "datetime", "close", "session"])
+    # 개장 전 시간외 거래에서의 등락. hours=20 이면 전날 13:30 이후라 대상일 pre 봉만 잡힘.
+    # days=1 로 하면 기준일의 pre 세션까지 섞여 이틀치가 됨.
+    p = day.price(hours=20, columns=["symbol", "datetime", "close", "session"])
     pre = p[p.session == "pre"].sort_values("datetime").groupby("symbol")["close"]
     x["pre_ret"] = x.symbol.map(
         pre.apply(lambda s: s.iloc[-1] / s.iloc[0] - 1 if len(s) > 1 else np.nan))

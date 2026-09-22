@@ -88,9 +88,12 @@ def report(r):
     print(f"{'급등락 적중':7} {num(s['big_prec'])}   급등락이라 찍은 것 중 맞은 비율")
     print(f"{'건수':10} {s['n']:,}\n")
 
-    name = dict(enumerate(LABELS))
-    print(pd.crosstab(r.label.map(name), r.label_pred.map(name),
-                      rownames=["실제"], colnames=["예측"], dropna=False).to_string())
+    ct = (pd.crosstab(r.label.astype(int), r.label_pred.astype(int),
+                      rownames=["실제"], colnames=["예측"])
+          .reindex(index=range(5), columns=range(5), fill_value=0))
+    ct.index, ct.columns = list(LABELS), list(LABELS)
+    ct.index.name, ct.columns.name = "실제", "예측"
+    print(ct.to_string())
     return s
 
 
