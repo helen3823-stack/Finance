@@ -1,0 +1,13 @@
+[project]
+name = "stock-direction"
+version = "0.1.0"
+description = "당일 장 시작 시점 정보로 종가 방향 예측"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2",
+    "pyarrow>=16",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "torch>=2.0",
+    "pydantic>=2.0",
+]
