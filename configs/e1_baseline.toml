@@ -1,0 +1,56 @@
+# E1 — Baseline + Decision Rule
+# 질문: 가장 강한 기준선과 결정 규칙은 무엇인가?
+# 복잡도 순서: k 1개 → 대칭 경계 2개 → 상승/하락 비대칭 → 경계 4개
+# 실행: python -m exp run configs/e1_baseline.toml
+
+name = "e1_baseline"
+stage = "E1"
+seed = 20261005
+
+[data]
+groups = ["core", "scale", "cross", "event", "regime"]
+
+[eval]
+baseline = "B2"
+bootstrap = 1000
+block_days = 5
+
+[[candidates]]
+name = "B0"
+signal = { type = "gap" }
+decision = { type = "flat" }
+
+[[candidates]]
+name = "B1"
+signal = { type = "gap" }
+decision = { type = "identity" }
+
+[[candidates]]
+name = "B2"
+signal = { type = "gap" }
+decision = { type = "k" }
+
+[[candidates]]
+name = "B2-Sym"
+signal = { type = "gap" }
+decision = { type = "sym2" }
+
+[[candidates]]
+name = "B2-Asym"
+signal = { type = "gap" }
+decision = { type = "asym" }
+
+[[candidates]]
+name = "B2-4T"
+signal = { type = "gap" }
+decision = { type = "4t" }
+
+[[candidates]]
+name = "B3"
+signal = { type = "regress", features = ["core"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "B4"
+signal = { type = "classify5", features = ["core"] }
+decision = { type = "4t" }

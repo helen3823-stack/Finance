@@ -1,0 +1,56 @@
+# E3 — 가격·이벤트 Feature Group Ablation (Forward + Leave-One-Group-Out)
+# 신호·결정 규칙은 E2 에서 채택한 구조로 고정. 아래는 regress + k (E2 결과로 type 만 바꾸면 됨)
+# 해석: Forward + / LOGO + → 견고한 증분,  Forward + / LOGO ≈ 0 → 중복,  둘 다 − → 제외 후보
+# 실행: python -m exp run configs/e3_ablation.toml
+
+name = "e3_ablation"
+stage = "E3"
+seed = 20261005
+
+[data]
+groups = ["core", "scale", "cross", "event", "regime"]
+
+[eval]
+baseline = "core"
+
+# ---- Forward
+[[candidates]]
+name = "core"
+signal = { type = "regress", features = ["core"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "core+scale"
+signal = { type = "regress", features = ["core", "scale"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "core+cross"
+signal = { type = "regress", features = ["core", "cross"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "core+event"
+signal = { type = "regress", features = ["core", "event"] }
+decision = { type = "k" }
+
+# ---- Leave-One-Group-Out (각 후보를 all 과 비교할 때는 eval.baseline = "all" 로 바꿔 한 번 더 실행)
+[[candidates]]
+name = "all"
+signal = { type = "regress", features = ["core", "scale", "cross", "event"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "all-scale"
+signal = { type = "regress", features = ["core", "cross", "event"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "all-cross"
+signal = { type = "regress", features = ["core", "scale", "event"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "all-event"
+signal = { type = "regress", features = ["core", "scale", "cross"] }
+decision = { type = "k" }

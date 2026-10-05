@@ -1,0 +1,20 @@
+# E7 — 제출용 학습
+# 후보 하나를 train_until 이전 전체 데이터(모든 종목, 20종목 묶음으로 교차 feature 계산)로 학습해
+# artifacts/pipeline.pkl (+ pipeline.json) 로 저장. 연구용 feature 를 쓰면 저장하지 않음
+# 실행: python -m exp export configs/final.toml --candidate final
+# 확인: python main.py check --split 2026-06-01
+
+name = "final"
+stage = "E7"
+seed = 20261005
+
+[data]
+groups = ["core", "scale", "cross", "event", "regime"]
+
+[export]
+train_until = "2100-01-01"       # 전체 기간. lockbox 평가(E6) 전에는 export 가 거부함 (exp/lockbox.py)
+
+[[candidates]]
+name = "final"                   # E6 에서 확정한 후보 spec 을 그대로 옮김
+signal = { type = "gap" }
+decision = { type = "k" }

@@ -1,0 +1,19 @@
+# E4-L — LLM 스크리닝 (연구용)
+# 기본은 dry_run = true: API 를 부르지 않고 보낼 입력만 runs/.../pending.jsonl 에 저장
+# 실제 호출 전 확인: 예산(팀 14만 원 중 절반 권장), max_calls, 그리고 G0(채점 환경 API 허용 여부)
+# 실행: python -m exp llm configs/e4_llm.toml
+
+name = "e4_llm"
+stage = "E4-L"
+seed = 20261005
+
+[llm]
+model = "claude-opus-5-5"
+effort = "low"                   # 짧은 분류 작업이라 low
+dry_run = true
+max_calls = 200                  # 이번 실행에서 새로 부를 최대 호출 수 (캐시 적중은 세지 않음)
+kinds = ["news"]                 # "reddit" 추가 가능
+variants = ["anon", "raw"]       # 누수 비교: 익명 입력 vs 원문 입력
+n_per_stratum = 50               # |갭| 3층 × 부호 2 = 6칸 × 50 = 뉴스 300건 (변형마다)
+reddit_sub = "stocks"
+reddit_n = 300

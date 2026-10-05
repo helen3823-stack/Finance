@@ -1,0 +1,40 @@
+# E4 — Analyst / News / Reddit 증분 검증
+# price 는 E3 에서 채택한 가격 묶음으로 바꿀 것 (아래는 core + scale 예시)
+# reddit, news_llm_* 는 연구용(research) 묶음. 제출 모델에는 쓸 수 없고, 채택·제외 근거를 만드는 데만 씀
+# 실행: python -m exp run      configs/e4_nonprice.toml     (ΔScore)
+#       python -m exp analyze  configs/e4_nonprice.toml     (갭 조건부 표)
+
+name = "e4_nonprice"
+stage = "E4"
+seed = 20261005
+
+[data]
+groups = ["core", "scale", "cross", "event", "analyst", "news", "regime"]
+research = ["reddit"]            # LLM 결과를 만든 뒤에는 "news_llm_anon", "news_llm_raw", "reddit_llm" 추가
+
+[eval]
+baseline = "price"
+
+[analysis]
+events = ["analyst", "earnings", "news_tone_vs_gap", "news_volume", "reddit_mentions"]
+bins = [0, 0.5, 1.0, 2.5]
+
+[[candidates]]
+name = "price"
+signal = { type = "regress", features = ["core", "scale"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "+analyst"
+signal = { type = "regress", features = ["core", "scale", "analyst"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "+news"
+signal = { type = "regress", features = ["core", "scale", "news"] }
+decision = { type = "k" }
+
+[[candidates]]
+name = "+reddit"
+signal = { type = "regress", features = ["core", "scale", "reddit"] }
+decision = { type = "k" }

@@ -1,0 +1,25 @@
+{
+  "lockbox_start": "2026-06-01",
+  "exposures": [
+    {
+      "time": "2026-10-04T00:00:00",
+      "source": "eda/00~04 노트북, eda_utils.build_panel",
+      "detail": "전체 기간(2024-08-14 ~ 2026-09-14)으로 기술 통계·신호 분석. 04_validation 의 시간+종목 holdout 평가 구간이 2026-01-01 ~ 2026-09-14 로 lockbox 를 포함",
+      "models": ["gap_rule", "regress(core·scale·cross·event·analyst·news·reddit)"]
+    },
+    {
+      "time": "2026-10-04T00:00:00",
+      "source": "EDA 보고서 검증 실험",
+      "detail": "2026-01-01 이후 구간에서 갭 규칙(k=5.25)의 block bootstrap, 변동성·실적 gating, paired SE 추정. k=5.25 는 이 구간 결과로 고른 값",
+      "models": ["gap_rule"]
+    },
+    {
+      "time": "2026-10-05T00:00:00",
+      "source": "python main.py eval --split 2026-06-01",
+      "detail": "기본 갭 규칙 label_of(5.25 × gap) 의 lockbox 점수를 확인함: score 0.5768, 급등락 포착 0.645, 적중 0.280 (3,650행)",
+      "models": ["gap_rule"]
+    }
+  ],
+  "plans": [],
+  "runs": []
+}

@@ -1,0 +1,38 @@
+# E5 — Test-Time Regime Calibration
+# 방향(부호)은 고정하고 크기 판단만 당일 20종목 regime 값에 따라 조정: s' = s × f(regime)
+# 신호·feature 는 E4 까지 채택한 구성으로 바꿀 것 (아래는 gap + k 예시)
+# regime 변수: reg_med_vol20 · reg_med_absgap · reg_gap_disp · reg_mkt_gap · reg_big_ratio
+# 실행: python -m exp run configs/e5_regime.toml
+
+name = "e5_regime"
+stage = "E5"
+seed = 20261005
+
+[data]
+groups = ["core", "scale", "cross", "event", "regime"]
+
+[eval]
+baseline = "T0"
+
+[[candidates]]
+name = "T0"
+signal = { type = "gap" }
+decision = { type = "k" }
+
+[[candidates]]
+name = "T1-vol"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "reg_med_vol20" } }
+
+[[candidates]]
+name = "T1-absgap"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "reg_med_absgap" } }
+
+[[candidates]]
+name = "T2-vol"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "linear", params = { var = "reg_med_vol20" } }

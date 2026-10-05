@@ -1,0 +1,30 @@
+# E6 — Lockbox 1회 평가 (사전 등록 → 1회 실행)
+# 1) DEV 에서 확정한 기준선과 최종 후보만 넣음. 두 spec 모두 DEV 실행 기록이 있어야 freeze 가 받아 줌
+# 2) python -m exp freeze configs/e6_lockbox.toml   ← 후보 spec 지문을 exp/lockbox_ledger.json 에 고정
+# 3) python -m exp run    configs/e6_lockbox.toml   ← 고정한 계획과 같을 때만, 한 번만 실행됨
+# freeze 이후 후보를 고치면 실행이 멈춤. 재실행은 --force-lockbox 로만 가능하고 장부·보고서에 "오염"으로 남음
+# 결과를 본 뒤 모델을 고치지 않음. DEV 결과와 반대면 기준선을 제출
+# 해석: 갭 규칙 계열은 EDA 에서 lockbox 가 이미 노출됨(장부 참고) → 절대 점수 말고 paired Δ 를 주 결과로 봄
+
+name = "e6_lockbox"
+stage = "E6"
+seed = 20261005
+
+[data]
+groups = ["core", "scale", "cross", "event", "regime"]
+
+[split]
+use_lockbox = true
+
+[eval]
+baseline = "baseline"
+
+[[candidates]]
+name = "baseline"
+signal = { type = "gap" }
+decision = { type = "k" }
+
+[[candidates]]
+name = "final"                   # DEV 에서 채택한 최종 후보로 바꿀 것
+signal = { type = "gap" }
+decision = { type = "k" }

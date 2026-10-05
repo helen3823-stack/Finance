@@ -1,0 +1,39 @@
+# E2 — 5-Class 직접 예측 vs Direction + Magnitude
+# 구조 효과만 보려고 feature 는 core 로 고정. 결정 경계는 모두 score 기준으로 tune 구간에서 고름
+# 기준선 "B" 는 E1 에서 확정한 규칙으로 바꿀 것 (아래는 B2)
+# 실행: python -m exp run configs/e2_structure.toml
+
+name = "e2_structure"
+stage = "E2"
+seed = 20261005
+
+[data]
+groups = ["core", "scale", "cross", "event", "regime"]
+
+[eval]
+baseline = "B"
+
+[[candidates]]
+name = "B"
+signal = { type = "gap" }
+decision = { type = "k" }
+
+[[candidates]]
+name = "D0"                      # Direct 5-Class
+signal = { type = "classify5", features = ["core"] }
+decision = { type = "4t" }
+
+[[candidates]]
+name = "D1"                      # Direction + 3-class Magnitude
+signal = { type = "decomp", features = ["core"], params = { magnitude = "multiclass" } }
+decision = { type = "decomp" }
+
+[[candidates]]
+name = "D2"                      # Direction + Ordinal Magnitude (Move head + Extreme head)
+signal = { type = "decomp", features = ["core"], params = { magnitude = "ordinal" } }
+decision = { type = "decomp" }
+
+[[candidates]]
+name = "D2-C"                    # D2 + Direction Confidence gate
+signal = { type = "decomp", features = ["core"], params = { magnitude = "ordinal" } }
+decision = { type = "decomp", params = { conf_gate = true } }
