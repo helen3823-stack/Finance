@@ -6,11 +6,15 @@
 """
 
 import argparse
+import sys
 
 from . import config as C
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):      # Windows 콘솔(cp949)에서 Δ·✗ 같은 문자가 깨지지 않게
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(prog="python -m exp", description="Finance 실험 하네스")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
