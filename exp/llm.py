@@ -219,17 +219,19 @@ def sample_reddit(cfg):
             # 같은 댓글 안에서 ticker가 몇 번 반복되는지
             ticker_mentions = len(rx.findall(text))
 
-            for s in sorted(found):
-                rows.append(
-                    {
-                        "symbol": s,
-                        "target": r["target"],
-                        "created_et": r["created_et"],
-                        "text": text[:1500],
-                        "text_len": len(text),
-                        "ticker_mentions": ticker_mentions,
-                    }
-                )
+            found_sorted = sorted(found)
+
+            rows.append(
+                {
+                    "symbol": found_sorted[0],
+                    "symbols": ",".join(found_sorted),
+                    "target": r["target"],
+                    "created_et": r["created_et"],
+                    "text": text[:1500],
+                    "text_len": len(text),
+                    "ticker_mentions": ticker_mentions,
+                }
+)
 
             if len(rows) >= pool_target:
                 break
@@ -241,6 +243,7 @@ def sample_reddit(cfg):
         return pd.DataFrame(
             columns=[
                 "symbol",
+                "symbols",
                 "target",
                 "text",
                 "sample_type",
@@ -251,7 +254,7 @@ def sample_reddit(cfg):
 
     # 중복 제거
     pool = pool.drop_duplicates(
-        subset=["symbol", "target", "text"]
+        subset=["target", "text"]
     ).reset_index(drop=True)
 
     # -------------------------------------------------------------------------
@@ -389,6 +392,7 @@ def sample_reddit(cfg):
     return out[
         [
             "symbol",
+            "symbols",
             "target",
             "text",
             "sample_type",
@@ -623,7 +627,22 @@ def run_llm(cfg):
             res.append(r)
         conv = _news_row if schema == "news_event" else _reddit_row
         f = pd.DataFrame([conv(r) if r else {} for r in res], index=s.index)
-        d = pd.concat([s[["symbol", "target"]], f], axis=1).dropna(subset=f.columns.tolist() or ["symbol"])
+        if schema == "news_event":
+            d = pd.concat(
+                [s[["symbol", "target"]], f],
+                axis=1
+            ).dropna(subset=f.columns.tolist() or ["symbol"])
+
+        else:
+            d = pd.concat(
+                [s[["symbols", "target"]], f],
+                axis=1
+            ).dropna(subset=f.columns.tolist() or ["symbols"])
+
+            # 한 Reddit 글은 LLM에 한 번만 넣고,
+            # 결과를 해당 글에서 언급된 모든 ticker에 다시 연결
+            d["symbol"] = d["symbols"].str.split(",")
+            d = d.explode("symbol")
         if not len(f.columns):
             continue
         if schema == "news_event":
@@ -657,6 +676,55 @@ def run_llm(cfg):
         for v in ("anon", "raw"):
             agree = np.sign(m[f"llm_{v}_sign"]) * np.sign(m["gap_pct"])
             summary[f"rest_by_agree_{v}"] = m.groupby(agree)["rest"].agg(["size", "mean"]).round(5).to_dict()
+        # -------------------------------------------------------------------------
+    # Reddit anon vs raw 비교
+    # 회사명 / ticker 제거 여부에 따라 LLM semantic 판단이 얼마나 달라지는지 확인
+    # -------------------------------------------------------------------------
+    if {"reddit_sentiment/anon", "reddit_sentiment/raw"} <= set(summary):
+        a = pd.read_parquet(
+            C.CACHE / "llm_reddit_features_anon.parquet"
+        )
+        b = pd.read_parquet(
+            C.CACHE / "llm_reddit_features_raw.parquet"
+        )
+
+        m = a.merge(
+            b,
+            on=["symbol", "target"],
+            suffixes=("_anon", "_raw"),
+        )
+
+        summary["reddit_anon_raw_pairs"] = int(len(m))
+
+        # bullish / bearish stance 기반 feature 일치 정도
+        summary["reddit_bull_agreement_anon_raw"] = float(
+            np.isclose(
+                m["llm_reddit_bull_anon"],
+                m["llm_reddit_bull_raw"],
+            ).mean()
+        )
+
+        # hype는 연속 평균값이므로 평균 절대 차이로 비교
+        summary["reddit_hype_mae_anon_raw"] = float(
+            (
+                m["llm_reddit_hype_anon"]
+                - m["llm_reddit_hype_raw"]
+            ).abs().mean()
+        )
+
+        # boolean semantic feature들은 일치율 확인
+        for c in [
+            "speculation",
+            "short_squeeze",
+            "event_reaction",
+            "disagreement",
+        ]:
+            summary[f"reddit_{c}_agreement_anon_raw"] = float(
+                np.isclose(
+                    m[f"llm_reddit_{c}_anon"],
+                    m[f"llm_reddit_{c}_raw"],
+                ).mean()
+            )
     with open(out / "pending.jsonl", "w", encoding="utf-8") as fh:
         for p in pending:
             fh.write(json.dumps(p, ensure_ascii=False) + "\n")
