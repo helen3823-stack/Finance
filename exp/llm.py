@@ -111,7 +111,8 @@ def _dev_panel(cfg):
 # 방법  : 대상일 창 안의 기사를 정규화 제목으로 중복 제거하고, (종목, 대상일)마다 가장 많이 반복된 제목을 대표로 고름
 #         |gap| 층 (small < 0.5, medium < 1.5, large ≥ 1.5 %) × 갭 부호 6칸에서 n_per_stratum 개씩 무작위 추출
 # input : cfg [llm] n_per_stratum, seed
-# output: DataFrame[symbol, target, title, gap_pct, stratum]
+#         max_calls는 신규 item 처리 수 기준이며 retry 횟수는 별도
+# output: DataFrame[symbol, target, text]  (universe ticker가 하나만 언급된 댓글만 사용)
 # -----------------------------------------------------------------------------
 def sample_news(cfg):
     L = cfg["llm"]
@@ -216,15 +217,26 @@ def sample_reddit(cfg):
             if not found:
                 continue
 
-            # 같은 댓글 안에서 ticker가 몇 번 반복되는지
-            ticker_mentions = len(rx.findall(text))
+            # Reddit semantic feature는 종목별 stance를 해석해야 하므로
+            # universe ticker가 하나만 언급된 글만 사용
+            if len(found) != 1:
+                continue
 
-            found_sorted = sorted(found)
+            symbol = next(iter(found))
+
+            
+            # 같은 댓글 안에서 ticker가 몇 번 반복되는지
+            ticker_mentions = sum(
+            1
+            for a, b in rx.findall(text)
+            if (a.upper() or b).replace(".", "-") == symbol
+)
+
+          
 
             rows.append(
                 {
-                    "symbol": found_sorted[0],
-                    "symbols": ",".join(found_sorted),
+                    "symbol": symbol,
                     "target": r["target"],
                     "created_et": r["created_et"],
                     "text": text[:1500],
@@ -243,7 +255,6 @@ def sample_reddit(cfg):
         return pd.DataFrame(
             columns=[
                 "symbol",
-                "symbols",
                 "target",
                 "text",
                 "sample_type",
@@ -392,7 +403,6 @@ def sample_reddit(cfg):
     return out[
         [
             "symbol",
-            "symbols",
             "target",
             "text",
             "sample_type",
@@ -635,14 +645,11 @@ def run_llm(cfg):
 
         else:
             d = pd.concat(
-                [s[["symbols", "target"]], f],
+                [s[["symbol", "target"]], f],
                 axis=1
-            ).dropna(subset=f.columns.tolist() or ["symbols"])
+            ).dropna(subset=f.columns.tolist() or ["symbol"])
 
-            # 한 Reddit 글은 LLM에 한 번만 넣고,
-            # 결과를 해당 글에서 언급된 모든 ticker에 다시 연결
-            d["symbol"] = d["symbols"].str.split(",")
-            d = d.explode("symbol")
+           
         if not len(f.columns):
             continue
         if schema == "news_event":
@@ -734,3 +741,4 @@ def run_llm(cfg):
     print(json.dumps(summary, indent=2, ensure_ascii=False, default=str))
     print(f"[llm] → {out}  (dry_run 이면 pending.jsonl 에 보낼 입력 {len(pending)}건)")
     return out
+
