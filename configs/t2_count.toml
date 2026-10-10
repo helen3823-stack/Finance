@@ -1,0 +1,47 @@
+# T2 — count 기준선 (w5-1 p39: 가장 강한 텍스트 기준선은 문서 도착 건수)
+# 질문: 어떤 "건수"가 크기 배율로 가장 쓸 만한가 (클러스터 수 / 새 기사 수 / 출처 수, 평소 대비 vs 원래 값)
+# 관련도는 T1 결과로 바꿀 것 (아래는 R1 예시)
+# 실행: python -m exp run configs/t2_count.toml
+
+name = "t2_count"
+stage = "T2"
+seed = 20261005
+
+[data]
+groups = ["core", "regime", "txt_count", "txt_meta"]
+
+[eval]
+baseline = "B2"
+
+[adopt]
+multiplicity = "holm"
+family_size = 23              # T1~T5 비기준선 후보 수 (T5 주석 2개 포함)
+
+[[candidates]]
+name = "B2"
+signal = { type = "gap" }
+decision = { type = "k" }
+
+[[candidates]]
+name = "clu_abn"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "n_clu_r1_abn" } }
+
+[[candidates]]
+name = "first_abn"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "n_first_r1_abn" } }
+
+[[candidates]]
+name = "first_raw"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "n_first_r1" } }
+
+[[candidates]]
+name = "sources"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "n_src_r1" } }

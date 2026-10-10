@@ -18,7 +18,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from src.data import START, label_of
-from src.model import NS, build_features
+from src.model import GROUP_TABLES, NS, build_features
 
 from .config import CACHE, ROOT, fingerprint
 from .lockbox import dev_only
@@ -33,6 +33,8 @@ RESEARCH_GROUPS = {
     "news_llm_anon": ["llm_anon_sign", "llm_anon_severity", "llm_anon_unexpected", "llm_anon_n"],
     "news_llm_raw": ["llm_raw_sign", "llm_raw_severity", "llm_raw_unexpected", "llm_raw_n"],
     "reddit_llm": ["llm_reddit_bull", "llm_reddit_hype", "llm_reddit_n"],
+    "finbert": ["fb_net_r1", "fb_neg_share_r1", "fb_n_r1"],                 # Colab FinBERT 결과 (exp/text.py)
+    "finbert_emb": [f"fb_pc{i}" for i in range(32)],                         # FinBERT 임베딩 PCA 32성분
 }
 LLM_FILES = {"news_llm_anon": "llm_features_anon.parquet", "news_llm_raw": "llm_features_raw.parquet",
              "reddit_llm": "llm_reddit_features.parquet"}
@@ -50,7 +52,7 @@ def load_tables(with_news=False):
          "earnings": pd.read_parquet(DATA / "earnings.parquet"),
          "analyst": pd.read_parquet(DATA / "analyst.parquet")}
     if with_news:
-        t["news"] = pq.read_table(DATA / "news.parquet", columns=["known_at", "symbols", "title", "tone"]).to_pandas()
+        t["news"] = pq.read_table(DATA / "news.parquet", columns=["known_at", "symbols", "source", "title", "tone"]).to_pandas()
     return t
 
 
@@ -96,6 +98,11 @@ def _attach_research(x, names):
         act = act.pivot(index="target", columns="symbol", values="items_abn")
         act.columns = [f"act_{c}_abn" for c in act.columns]
         x = x.merge(act.reset_index(), on="target", how="left")
+    if {"finbert", "finbert_emb"} & set(names):
+        from .text import finbert_features
+        fb = finbert_features(sorted(x["symbol"].unique()))
+        if len(fb.columns) > 2:
+            x = x.merge(fb, on=key, how="left")
     for name, fname in LLM_FILES.items():
         if name in names:
             path = CACHE / fname
@@ -107,6 +114,13 @@ def _attach_research(x, names):
         if c not in x.columns:
             x[c] = np.nan
     return x
+
+
+def _research_stamp(name):
+    """연구용 묶음의 원천 파일 수정 시각 (없으면 None). reddit 은 EDA 캐시라 코드 지문으로 충분함"""
+    from .text import FINBERT_SCORES
+    f = {"finbert": FINBERT_SCORES, "finbert_emb": FINBERT_SCORES}.get(name) or (CACHE / LLM_FILES[name] if name in LLM_FILES else None)
+    return int(f.stat().st_mtime) if f is not None and f.exists() else None
 
 
 # -----------------------------------------------------------------------------
@@ -122,9 +136,10 @@ def _attach_research(x, names):
 # -----------------------------------------------------------------------------
 def universe_panel(universe, groups=(), research=(), allow_lockbox=False):
     universe = sorted(universe)
-    with_news = "news" in groups
+    with_news = any("news" in GROUP_TABLES.get(g, ()) for g in groups)
     fp = fingerprint()
-    key = hashlib.sha256(json.dumps([universe, with_news, sorted(research), fp], sort_keys=True).encode()).hexdigest()[:16]
+    stamps = [(n, _research_stamp(n)) for n in sorted(research)]     # 연구 결과 파일이 바뀌면 캐시도 새로
+    key = hashlib.sha256(json.dumps([universe, with_news, stamps, fp], sort_keys=True).encode()).hexdigest()[:16]
     path = CACHE / f"panel_{key}.parquet"
     if path.exists():
         return dev_only(pd.read_parquet(path), allow_lockbox)

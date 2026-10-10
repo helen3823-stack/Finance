@@ -1,0 +1,45 @@
+# T4 — 신규성 · 사건 유형 (w5-1 p22~23)
+# 질문: "새로운 이야기인가"(novelty), "어떤 사건인가"(earnings·guidance·legal·M&A …)가 count 위에 크기 정보를 더하는가
+# 실행: python -m exp run configs/t4_event.toml
+
+name = "t4_event"
+stage = "T4"
+seed = 20261005
+
+[data]
+groups = ["core", "regime", "txt_count", "txt_novelty", "txt_event", "txt_meta"]
+
+[eval]
+baseline = "count"
+
+[adopt]
+multiplicity = "holm"
+family_size = 23              # T1~T5 비기준선 후보 수 (T5 주석 2개 포함)
+
+[analysis]
+events = ["txt_event", "txt_novelty"]
+bins = [0, 0.5, 1.0, 2.5]
+
+[[candidates]]
+name = "count"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "textclf", params = { input = "columns", columns = ["n_first_r1_abn", "n_clu_r1_abn", "n_scored_r1"] } }
+
+[[candidates]]
+name = "count+novelty"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "textclf", params = { input = "columns", columns = ["n_first_r1_abn", "n_clu_r1_abn", "n_scored_r1", "txt_novelty"] } }
+
+[[candidates]]
+name = "count+event"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "textclf", params = { input = "columns", columns = ["n_first_r1_abn", "n_clu_r1_abn", "n_scored_r1", "txt_event"] } }
+
+[[candidates]]
+name = "count+novelty+event"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "textclf", params = { input = "columns", columns = ["n_first_r1_abn", "n_clu_r1_abn", "n_scored_r1", "txt_novelty", "txt_event"] } }

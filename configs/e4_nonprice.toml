@@ -1,8 +1,10 @@
 # E4 — Analyst / News / Reddit 증분 검증
-# price 는 E3 에서 채택한 가격 묶음으로 바꿀 것 (아래는 core + scale 예시)
+# price = E3 결과 반영: 가격·이벤트 묶음(scale·cross·event)은 증분이 없어 core 만 씀
 # reddit, news_llm_* 는 연구용(research) 묶음. 제출 모델에는 쓸 수 없고, 채택·제외 근거를 만드는 데만 씀
 # 실행: python -m exp run      configs/e4_nonprice.toml     (ΔScore)
 #       python -m exp analyze  configs/e4_nonprice.toml     (갭 조건부 표)
+# 2026-10-06 수정: 회귀 신호(regress)의 k 탐색 상한 8 → 16. E3 에서 여러 분할의 k 가 상한 8.0 에 닿아
+#   회귀 신호가 불리하게 평가됐을 수 있어 범위만 넓힘 (k 는 여전히 학습 구간 안에서 고름). 갭 규칙 후보는 그대로
 
 name = "e4_nonprice"
 stage = "E4"
@@ -21,20 +23,20 @@ bins = [0, 0.5, 1.0, 2.5]
 
 [[candidates]]
 name = "price"
-signal = { type = "regress", features = ["core", "scale"] }
-decision = { type = "k" }
+signal = { type = "regress", features = ["core"] }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "+analyst"
-signal = { type = "regress", features = ["core", "scale", "analyst"] }
-decision = { type = "k" }
+signal = { type = "regress", features = ["core", "analyst"] }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "+news"
-signal = { type = "regress", features = ["core", "scale", "news"] }
-decision = { type = "k" }
+signal = { type = "regress", features = ["core", "news"] }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "+reddit"
-signal = { type = "regress", features = ["core", "scale", "reddit"] }
-decision = { type = "k" }
+signal = { type = "regress", features = ["core", "reddit"] }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }

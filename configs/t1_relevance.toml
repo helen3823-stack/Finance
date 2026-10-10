@@ -1,0 +1,47 @@
+# T1 — 기업 연결 관련도 (docs/text_pipeline.md 5절)
+# 질문: 태그만(R0) / 제목 언급(R1) / 그 회사만 언급(R2) 중 어디에 "크기" 신호가 있는가
+# 방법: 갭 규칙(B2)에 "새 기사 수의 평소 대비 비율" 삼분위 배율을 붙여 비교. 방향은 갭 그대로
+# lockbox 사용 후 실험이라 Holm 보정 (family_size = T1~T5 후보 전체 수)
+# 실행: python -m exp run configs/t1_relevance.toml
+#       python -m exp analyze configs/t1_relevance.toml   (같은 갭 구간 안에서 관련도별 급등락 비율)
+
+name = "t1_relevance"
+stage = "T1"
+seed = 20261005
+
+[data]
+groups = ["core", "regime", "txt_count", "txt_meta"]
+
+[eval]
+baseline = "B2"
+
+[adopt]
+multiplicity = "holm"
+family_size = 23              # T1~T5 비기준선 후보 수 (T5 주석 2개 포함)
+
+[analysis]
+events = ["txt_relevance", "txt_first_r1"]
+bins = [0, 0.5, 1.0, 2.5]
+
+[[candidates]]
+name = "B2"
+signal = { type = "gap" }
+decision = { type = "k" }
+
+[[candidates]]
+name = "first_r0"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "n_first_r0_abn" } }
+
+[[candidates]]
+name = "first_r1"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "n_first_r1_abn" } }
+
+[[candidates]]
+name = "first_r2"
+signal = { type = "gap" }
+decision = { type = "k" }
+regime = { type = "tercile", params = { var = "n_first_r2_abn" } }

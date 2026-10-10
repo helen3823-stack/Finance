@@ -51,6 +51,9 @@ DEFAULTS = {
         "flip_tol": 0.02,            # 채택: flip 지수 증가 ≤ tol
         "extreme_band": 0.25,        # 채택: 예측 급등락 비율이 기준선의 ±25% 안
         "min_gain": 0.0,             # 보류: 평균 Δ 가 이 값 미만이면 비용 대비 효과 부족
+        "multiplicity": None,        # "holm" 이면 bootstrap p 를 Holm 으로 보정해 채택 조건에 추가
+        "family_size": None,         # Holm 가족 크기 (None = 이 config 의 후보 수). 여러 단계를 합칠 때 크게
+        "alpha": 0.05,
     },
     "candidates": [],
 }
@@ -107,12 +110,13 @@ def derive_seed(base, *keys):
 
 # -----------------------------------------------------------------------------
 # 기능  : 코드·데이터 지문
-#         code  src/model.py, src/data.py, exp/*.py 내용의 sha256
+#         code  src/model.py, src/data.py, exp/*.py, artifacts/text_resources.json 내용의 sha256
 #         data  dataset/ 파일들의 (이름, 크기, 수정 시각)
 # output: {"code": 12자리, "data": 12자리}
 # -----------------------------------------------------------------------------
 def fingerprint():
     files = [ROOT / "src" / "model.py", ROOT / "src" / "data.py", *sorted((ROOT / "exp").glob("*.py"))]
+    files += [p for p in [ROOT / "artifacts" / "text_resources.json"] if p.exists()]   # 텍스트 자원도 feature 를 바꿈
     code = hashlib.sha256(b"".join(p.read_bytes() for p in files)).hexdigest()[:12]
     ds = sorted((ROOT / "dataset").rglob("*.parquet"))
     sig = json.dumps([(p.relative_to(ROOT).as_posix(), p.stat().st_size, int(p.stat().st_mtime)) for p in ds])

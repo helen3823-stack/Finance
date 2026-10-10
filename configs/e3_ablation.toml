@@ -2,6 +2,8 @@
 # 신호·결정 규칙은 E2 에서 채택한 구조로 고정. 아래는 regress + k (E2 결과로 type 만 바꾸면 됨)
 # 해석: Forward + / LOGO + → 견고한 증분,  Forward + / LOGO ≈ 0 → 중복,  둘 다 − → 제외 후보
 # 실행: python -m exp run configs/e3_ablation.toml
+# 2026-10-06 수정: 회귀 신호(regress)의 k 탐색 상한 8 → 16. E3 에서 여러 분할의 k 가 상한 8.0 에 닿아
+#   회귀 신호가 불리하게 평가됐을 수 있어 범위만 넓힘 (k 는 여전히 학습 구간 안에서 고름). 갭 규칙 후보는 그대로
 
 name = "e3_ablation"
 stage = "E3"
@@ -17,40 +19,40 @@ baseline = "core"
 [[candidates]]
 name = "core"
 signal = { type = "regress", features = ["core"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "core+scale"
 signal = { type = "regress", features = ["core", "scale"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "core+cross"
 signal = { type = "regress", features = ["core", "cross"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "core+event"
 signal = { type = "regress", features = ["core", "event"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 # ---- Leave-One-Group-Out (각 후보를 all 과 비교할 때는 eval.baseline = "all" 로 바꿔 한 번 더 실행)
 [[candidates]]
 name = "all"
 signal = { type = "regress", features = ["core", "scale", "cross", "event"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "all-scale"
 signal = { type = "regress", features = ["core", "cross", "event"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "all-cross"
 signal = { type = "regress", features = ["core", "scale", "event"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
 
 [[candidates]]
 name = "all-event"
 signal = { type = "regress", features = ["core", "scale", "cross"] }
-decision = { type = "k" }
+decision = { type = "k", params = { k_grid = [0.5, 16.0, 0.25] } }
