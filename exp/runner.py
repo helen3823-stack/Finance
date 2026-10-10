@@ -30,7 +30,7 @@ from . import lockbox as LB
 from .metrics import evaluate
 from .panel import RESEARCH_GROUPS, load_tables, universe_panel
 from .splits import fold_masks, partition, universe_draws
-from .stats import decide, paired_bootstrap
+from .stats import decide, holm, paired_bootstrap
 
 
 def _symbols():
@@ -146,14 +146,18 @@ def _compare(P, cfg):
             ext.append(ac["pred_extreme"] / ab["pred_extreme"] if ab["pred_extreme"] else np.nan)
         bt = paired_bootstrap(units, ev["bootstrap"], ev["block_days"], cfg["seed"])
         fold_delta = pd.Series(bt["per_unit"]).groupby(level=0).mean().to_dict()
-        row = {"candidate": cand, "delta": bt["delta"], "ci_low": bt["ci_low"], "ci_high": bt["ci_high"],
-               "se": bt["se"], "fold_delta": fold_delta, "unseen_delta": float(np.nanmean(unseen)),
-               "flip_diff": float(np.nanmean(flips)), "extreme_ratio": float(np.nanmean(ext))}
-        row["decision"], why = decide(row, cfg["adopt"])
-        row["reasons"] = "; ".join(why)
-        rows.append({**{k: v for k, v in row.items() if k != "fold_delta"},
-                     **{f"fold_{k}": v for k, v in fold_delta.items()}})
-    return pd.DataFrame(rows)
+        rows.append({"candidate": cand, "delta": bt["delta"], "ci_low": bt["ci_low"], "ci_high": bt["ci_high"],
+                     "se": bt["se"], "p": bt["p"], "fold_delta": fold_delta, "unseen_delta": float(np.nanmean(unseen)),
+                     "flip_diff": float(np.nanmean(flips)), "extreme_ratio": float(np.nanmean(ext))})
+    adj = holm([r["p"] for r in rows], cfg["adopt"].get("family_size")) if rows else []
+    out = []
+    for r, ph in zip(rows, adj):
+        r["p_holm"] = float(ph)
+        r["decision"], why = decide(r, cfg["adopt"])
+        r["reasons"] = "; ".join(why)
+        out.append({**{k: v for k, v in r.items() if k != "fold_delta"},
+                    **{f"fold_{k}": v for k, v in r["fold_delta"].items()}})
+    return pd.DataFrame(out)
 
 
 # -----------------------------------------------------------------------------

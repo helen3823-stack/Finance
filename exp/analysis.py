@@ -32,6 +32,18 @@ EVENTS = {
     "llm_anon_vs_gap": lambda x: _agree(x["llm_anon_sign"], x),
     "llm_raw_vs_gap": lambda x: _agree(x["llm_raw_sign"], x),
     "reddit_mentions": lambda x: pd.qcut(x["mentions_abn"], 4, labels=["q1", "q2", "q3", "q4 급증"], duplicates="drop").astype(str),
+    # ---- 텍스트 파이프라인 (docs/text_pipeline.md T1, T4, T5)
+    "txt_relevance": lambda x: pd.Series(np.select([x["n_first_r2"] > 0, x["n_first_r1"] > 0, x["n_first_r0"] > 0],
+                                                   ["R2 새 기사", "R1 새 기사", "R0 태그만"], "없음"), index=x.index),
+    "txt_first_r1": lambda x: pd.Series(np.select([x["n_first_r1"] >= 3, x["n_first_r1"] >= 1], ["3건+", "1~2건"], "0건"),
+                                        index=x.index),
+    "txt_event": lambda x: pd.Series(np.where(x["ev_any_r1"] == 1, "사건 있음", np.where(x["n_scored_r1"] > 0, "사건 없음", "기사 없음")),
+                                     index=x.index),
+    "txt_novelty": lambda x: pd.Series(np.select([x["novelty_r1"] >= 0.7, x["novelty_r1"] >= 0.4, x["novelty_r1"].notna()],
+                                                 ["높음 ≥0.7", "중간", "낮음 <0.4"], "기사 없음"), index=x.index),
+    "txt_lm_vs_gap": lambda x: _agree(np.sign(x["lm_net_r1"]), x),
+    "txt_gdelt_vs_gap": lambda x: _agree(np.sign(x["tone_mean_r1"]), x),
+    "txt_finbert_vs_gap": lambda x: _agree(np.sign(x["fb_net_r1"]), x),
 }
 
 
@@ -73,7 +85,8 @@ def run_analysis(cfg):
     bins = tuple(a.get("bins", (0, 0.5, 1.0, 2.5))) + (np.inf,)
     for ev in events:
         need = {"news_tone_vs_gap": "news", "news_volume": "news", "reddit_mentions": "reddit",
-                "llm_anon_vs_gap": "news_llm_anon", "llm_raw_vs_gap": "news_llm_raw"}.get(ev)
+                "llm_anon_vs_gap": "news_llm_anon", "llm_raw_vs_gap": "news_llm_raw",
+                "txt_finbert_vs_gap": "finbert"}.get(ev)
         if need in RESEARCH_GROUPS and need not in cfg["data"]["research"]:
             print(f"[analysis] {ev}: data.research 에 '{need}' 가 없어 건너뜀")
             continue

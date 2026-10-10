@@ -5,6 +5,13 @@
 # freeze 이후 후보를 고치면 실행이 멈춤. 재실행은 --force-lockbox 로만 가능하고 장부·보고서에 "오염"으로 남음
 # 결과를 본 뒤 모델을 고치지 않음. DEV 결과와 반대면 기준선을 제출
 # 해석: 갭 규칙 계열은 EDA 에서 lockbox 가 이미 노출됨(장부 참고) → 절대 점수 말고 paired Δ 를 주 결과로 봄
+#
+# 사전 등록한 판정 규칙 (2026-10-10, lockbox 실행 전에 정함)
+#   baseline = E1 의 B2 (= E5 의 T0): 갭 × k
+#   final    = E5 의 T1-vol (DEV 채택: Δ +0.0052, 95% CI +0.0012 ~ +0.0093, 세 fold 모두 양수)
+#   lockbox Δ(final − baseline) ≥ 0  → final 제출 (유의하지 않아도 DEV 와 같은 방향이면 채택)
+#   lockbox Δ < 0                    → baseline 제출 (DEV 와 반대 방향)
+#   73일이라 SE 가 DEV 보다 큼 → Δ ≈ +0.005 가 유의하게 나오지 않을 수 있음을 미리 인정함
 
 name = "e6_lockbox"
 stage = "E6"
@@ -25,6 +32,7 @@ signal = { type = "gap" }
 decision = { type = "k" }
 
 [[candidates]]
-name = "final"                   # DEV 에서 채택한 최종 후보로 바꿀 것
+name = "final"                   # = E5 T1-vol (spec 을 한 글자도 바꾸지 말 것. freeze 가 DEV 기록과 대조함)
 signal = { type = "gap" }
 decision = { type = "k" }
+regime = { type = "tercile", params = { var = "reg_med_vol20" } }

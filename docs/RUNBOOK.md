@@ -309,6 +309,63 @@ python -m exp llm configs/e4_llm.toml
 
 ---
 
+## 8-1. 텍스트 파이프라인 (T 단계)
+
+설계는 `docs/text_pipeline.md`. 뉴스 제목으로 **"크기(급등락 여부)"** 를 예측하고, 방향은 갭이 맡는 구조임.
+
+### 준비 (한 번만)
+
+1. **LM 금융 사전**: [Loughran-McDonald Master Dictionary](https://sraf.nd.edu/loughranmcdonald-master-dictionary/) CSV 를 받아 `resources/` 폴더에 둠 (파일 이름에 `MasterDictionary` 가 들어가면 됨)
+2. 텍스트 자원 만들기 (LM 사전 + 회사 이름 → `artifacts/text_resources.json`, 제출에도 쓰임):
+
+```bash
+python -m exp text resources
+```
+
+3. 확인: E0 가 텍스트 feature 까지 대조함
+
+```bash
+python -m exp check e0
+```
+
+### FinBERT (Colab, 연구용)
+
+FinBERT 결과는 채점 기간(10월)의 새 제목에는 없어서 **제출 모델에는 못 씀**. 비교 실험(T3, T5)용임.
+
+1. 채점할 제목 내보내기 → `exp/cache/text/titles_for_finbert.parquet` (약 34만 개)
+
+```bash
+python -m exp text export-titles
+```
+
+2. Colab 에 `colab/finbert_colab.py` 와 위 파일을 올리고 GPU 런타임에서:
+   `!pip install -q transformers pyarrow` → `!python finbert_colab.py titles_for_finbert.parquet finbert_scores.parquet`
+3. 받은 `finbert_scores.parquet` 를 가져오기:
+
+```bash
+python -m exp text import-finbert finbert_scores.parquet
+```
+
+4. `configs/t5_vectorizer.toml` 의 `finbert_emb` 후보 주석을 풀고 다시 실행
+
+### 실험 순서
+
+| 단계 | 명령 | 질문 |
+|---|---|---|
+| T1 | `python -m exp run configs/t1_relevance.toml` | 태그만 / 제목 언급 / 그 회사만 언급 중 어디에 크기 신호가 있나 |
+| T2 | `python -m exp run configs/t2_count.toml` | 어떤 "건수" 가 가장 쓸 만한가 (count 기준선) |
+| T3 | `python -m exp run configs/t3_tone.toml` | 톤(GDELT · LM · FinBERT)이 count 위에 정보를 더하나 |
+| T4 | `python -m exp run configs/t4_event.toml` | 신규성·사건 유형이 count 위에 정보를 더하나 |
+| T5 | `python -m exp run configs/t5_vectorizer.toml` | vectorizer 별 텍스트 분류기 ablation |
+| T6 | `python -m exp llm configs/t6_llm.toml` | LLM silver label · placebo · 사건 파서 (기본 dry run) |
+| 표 | `python -m exp analyze configs/t1_relevance.toml` | 같은 갭 구간 안에서 텍스트 범주별 급등락 비율 |
+| 설명 | `python -m exp explain configs/t5_vectorizer.toml --candidate tfidf_uni` | 묶음별 block permutation, 단어 계수, 안정성 |
+
+- T 단계는 lockbox 를 쓴 뒤의 실험이라 **Holm 보정**(`[adopt] multiplicity = "holm"`)이 채택 조건에 들어감
+- 텍스트 분류기는 `regime = { type = "textclf", params = { input = "text", vectorizer = "tfidf_uni" } }` 처럼 config 이름만 바꿔 씀 (vectorizer 후보: `count_uni` `tfidf_uni` `tfidf_bi` `tfidf_char` `tfidf_stop` `tfidf_df` `lm_vocab` `hashing`)
+
+---
+
 ## 9. 제출
 
 1. lockbox 평가(E6)가 끝난 뒤, `configs/final.toml` 의 후보를 E6 의 `final` 과 같게 맞춤

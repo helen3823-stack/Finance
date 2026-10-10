@@ -1,7 +1,7 @@
 """명령행 진입점.
 
 기능  : python -m exp <명령> 으로 실험 단계를 실행
-구성  : run · check · analyze · llm · freeze · lockbox · export
+구성  : run · check · analyze · llm · text · explain · freeze · lockbox · export
 역할  : 단계별 실행 방법을 하나로 통일. 무엇을 돌릴지는 config 파일이 정함
 """
 
@@ -33,6 +33,16 @@ def main():
     lm = sub.add_parser("llm", help="E4-L LLM 스크리닝 (기본 dry_run)")
     lm.add_argument("config")
 
+    tx = sub.add_parser("text", help="텍스트 자원·FinBERT 연동")
+    tx.add_argument("action", choices=["resources", "articles", "export-titles", "import-finbert"])
+    tx.add_argument("path", nargs="?", help="import-finbert: Colab 결과 parquet 경로")
+
+    ex = sub.add_parser("explain", help="후보 모델 설명 (block permutation · PDP/ICE · faithfulness · stability)")
+    ex.add_argument("config")
+    ex.add_argument("--candidate", required=True)
+    ex.add_argument("--reps", type=int, default=30)
+    ex.add_argument("--block", type=int, default=5)
+
     fz = sub.add_parser("freeze", help="E6 사전 등록: lockbox 에서 평가할 후보 spec 을 고정")
     fz.add_argument("config")
 
@@ -58,6 +68,21 @@ def main():
     elif args.cmd == "llm":
         from .llm import run_llm
         run_llm(C.load(args.config))
+    elif args.cmd == "text":
+        from . import text as T
+        if args.action == "resources":
+            T.resources()
+        elif args.action == "articles":
+            T.articles(rebuild=True)
+        elif args.action == "export-titles":
+            T.export_titles()
+        else:
+            if not args.path:
+                raise SystemExit("import-finbert 에는 Colab 결과 parquet 경로가 필요함")
+            T.import_finbert(args.path)
+    elif args.cmd == "explain":
+        from .explain import run_explain
+        run_explain(C.load(args.config), args.candidate, args.reps, args.block)
     elif args.cmd == "freeze":
         from .lockbox import freeze
         cfg = C.load(args.config)

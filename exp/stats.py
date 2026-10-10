@@ -82,15 +82,35 @@ def paired_bootstrap(units, B, block_days, seed):
         reps.append(score_from_counts(W @ Cc) - score_from_counts(W @ Cb))
     rep = np.nanmean(np.vstack(reps), axis=0)
     lo, hi = np.nanpercentile(rep, [2.5, 97.5])
+    p = float(min(1.0, 2 * min(np.mean(rep <= 0), np.mean(rep >= 0))))      # 양측 bootstrap p-value
     return {"delta": float(np.mean(list(per_unit.values()))), "ci_low": float(lo), "ci_high": float(hi),
-            "se": float(np.nanstd(rep)), "per_unit": per_unit}
+            "se": float(np.nanstd(rep)), "p": p, "per_unit": per_unit}
+
+
+# -----------------------------------------------------------------------------
+# 기능  : Holm 다중비교 보정 (lockbox 를 쓴 뒤의 텍스트 실험처럼 후보가 많을 때)
+# 수식  : p 오름차순 p_(1) ≤ … ≤ p_(k),  m = 가족 크기 (기본 k, 여러 단계를 합치면 그보다 큼)
+#         p_holm,(i) = max_{j ≤ i} min(1, (m − j + 1) · p_(j))
+# input : p 값 목록, family_size
+# output: 보정된 p 목록 (입력 순서)
+# -----------------------------------------------------------------------------
+def holm(ps, family_size=None):
+    ps = np.asarray(ps, float)
+    m = max(int(family_size or len(ps)), len(ps))
+    order = np.argsort(ps)
+    adj, run = np.empty_like(ps), 0.0
+    for j, i in enumerate(order):
+        run = max(run, min(1.0, (m - j) * ps[i]))
+        adj[i] = run
+    return adj
 
 
 # -----------------------------------------------------------------------------
 # 기능  : 채택 / 보류 / 제외 판정 (설계 문서 16절)
 # input : row  {"fold_delta": {fold: Δ}, "delta", "ci_low", "ci_high", "unseen_delta",
 #               "flip_diff", "extreme_ratio"}
-#         rule config["adopt"]  (reject_fold_tol: 이만큼 넘게 음수인 fold 만 '악화'로 셈)
+#         rule config["adopt"]  (reject_fold_tol: 이만큼 넘게 음수인 fold 만 '악화'로 셈,
+#                                multiplicity="holm" 이면 row["p_holm"] < alpha 도 채택 조건)
 # output: ("adopt" | "hold" | "reject", 근거 문자열 목록)
 # -----------------------------------------------------------------------------
 def decide(row, rule):
@@ -113,5 +133,7 @@ def decide(row, rule):
             abs(row["extreme_ratio"] - 1) <= rule["extreme_band"],
         f"평균 Δ {row['delta']:+.4f} ≥ {rule['min_gain']}": row["delta"] >= rule["min_gain"],
     }
+    if rule.get("multiplicity") == "holm":
+        checks[f"Holm p {row['p_holm']:.3f} < {rule['alpha']} (가족 {rule.get('family_size') or '후보 수'})"] =             row["p_holm"] < rule["alpha"]
     failed = [f"✗ {k}" for k, ok in checks.items() if not ok]
     return ("adopt", list(checks)) if not failed else ("hold", failed)

@@ -247,12 +247,292 @@ def _news_block(n, targets, universe):
     return out.reset_index()
 
 
+# =============================================================================
+# 2-T. 텍스트 (뉴스 제목) — docs/text_pipeline.md
+#      수집 → 정제(템플릿·근접중복·최초보도) → 기업 연결(R0/R1/R2) → 토큰화 → 표현 → 종목-대상일 집계
+#      학습(전체 표)과 predict(최근 NEWS_HIST_DAYS 거래일)가 같은 값을 내도록, 모든 과거 참조는
+#      "직전 몇 개 대상일 창" 단위로만 함 (FIRST_LOOKBACK, NEWS_WINDOW)
+# =============================================================================
+
+TEXT_RESOURCES = ARTIFACTS / "text_resources.json"
+FIRST_LOOKBACK = 5        # 최초 보도: 직전 5개 창에 같은 클러스터가 없으면 새 이야기
+RELEVANCE = ("r0", "r1", "r2")
+NEGATORS = {"no", "not", "never", "without", "neither", "nor", "none", "cannot", "nobody", "nothing"}
+STOPWORDS = {"a", "an", "the", "of", "in", "on", "at", "to", "for", "by", "with", "from", "and", "or", "as",
+             "is", "are", "was", "were", "be", "been", "its", "it", "this", "that", "these", "those", "into",
+             "over", "after", "before", "about", "s", "inc", "corp", "co", "ltd", "plc", "llc", "nyse", "nasdaq"}
+# 기업 이름과 겹치는 일반 단어 티커는 cashtag($) 나 이름으로만 인정 (새 종목도 2글자 이하는 같은 규칙)
+COMMON_TICKERS = {"NOW", "COST", "WELL", "GILD", "COP", "BA", "DE", "GE", "KO", "MS", "PM", "CB", "V", "ALL", "ARE"}
+# 자동 생성 기사: 기관 보유(13F)·내부자 매매·공매도 잔고·종목 목록 기사. 새 정보가 아님 (w4-2 p17 boilerplate)
+TEMPLATE_RX = (
+    r"(?:shares (?:sold|bought|purchased|acquired) by|shares (?:in|of) .{0,80}(?:acquired|sold|bought|purchased) by"
+    r"|(?:acquires?|buys?|sells?|purchases?|trims?|cuts?|lowers?|raises?|boosts?|increases?|decreases?|reduces?|grows?|lifts?)"
+    r" (?:\$[\d.,]+ (?:million|billion) |new |[\d,]+ shares (?:of|in) |its )?(?:stake|position|holdings?|shares)\b"
+    r"|(?:stake|position|holdings?) (?:in|raised|lowered|boosted|trimmed|cut|increased|decreased|reduced|lifted)\b"
+    r"|has \$[\d.,]+ (?:million|billion|thousand)|invests? \$[\d.,]+ (?:million|billion|thousand) in|stock position"
+    r"|takes position in|(?:sells?|buys?) [\d,]+ shares|sells? \$[\d.,]+ in stock|insider (?:selling|buying|sells|buys)"
+    r"|short interest|stocks to (?:add|watch|buy)|watchlist)")
+# 사건 유형 (w5-1 p22 named event). 소문자 제목에 적용
+EVENT_RX = {
+    "earn":  r"\b(?:earnings|eps|quarterly (?:results|profit|revenue)|q[1-4] (?:results|earnings|revenue|sales)|beats?|miss(?:es|ed)?|profit (?:rises|falls|jumps|drops))\b",
+    "guid":  r"\b(?:guidance|outlook|forecasts?|raises? (?:its )?(?:full-year|annual|outlook|forecast)|cuts? (?:its )?(?:outlook|forecast))\b",
+    "anal":  r"\b(?:upgraded?s?|downgraded?s?|price target|initiates? coverage|reiterates?|overweight|underweight|outperform|underperform)\b",
+    "legal": r"\b(?:lawsuit|sued?s?|probe|investigation|settles?|settlement|fined?|antitrust|subpoena|recalls?|indicted|charges filed)\b",
+    "mna":   r"\b(?:acquisition|acquires?|to acquire|merger|merges?|buyout|takeover|deal to buy|spin-?off|divest\w*)\b",
+    "prod":  r"\b(?:launch\w*|unveil\w*|fda|approv\w+|clinical trial|patent|rollout|release[sd]? new)\b",
+    "mgmt":  r"\b(?:ceo|cfo|chief executive|resign\w*|steps? down|appoint\w*|succeed\w*|layoffs?|job cuts)\b",
+}
+
+FEATURE_GROUPS.update({
+    "txt_count": [f"n_clu_{r}" for r in RELEVANCE] + [f"n_first_{r}" for r in RELEVANCE]
+                 + [f"n_clu_{r}_abn" for r in RELEVANCE] + [f"n_first_{r}_abn" for r in RELEVANCE] + ["n_src_r1"],
+    "txt_tone_gdelt": ["tone_mean_r1", "tone_neg_share_r1", "tone_sd_r1"],
+    "txt_tone_lm": ["lm_net_r1", "lm_neg_share_r1", "lm_unc_r1"],
+    "txt_novelty": ["novelty_r1"],
+    "txt_event": [f"ev_{e}_r1" for e in EVENT_RX] + ["ev_any_r1"],
+    "txt_meta": ["n_scored_r1", "tmpl_share_r0", "alias_missing"],
+    "txt_text": ["titles_r1"],
+})
+for _g in ("txt_count", "txt_tone_gdelt", "txt_tone_lm", "txt_novelty", "txt_event", "txt_meta", "txt_text"):
+    GROUP_TABLES[_g] = {"news"}
+TEXT_COLS = {"titles_r1"}                      # 문자열 열 (숫자 비교·결측 채우기에서 제외)
+DEPLOYABLE = {c for cols in FEATURE_GROUPS.values() for c in cols}
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 텍스트 자원 읽기 (artifacts/text_resources.json, `python -m exp text resources` 로 만듦)
+# output: {"aliases": {티커: [이름]}, "lm": {"positive", "negative", "uncertainty": [단어]}, "version"} 또는 빈 dict
+#         파일이 없으면 alias·LM 사전 없이 티커 매칭만 함 (LM feature 는 NaN)
+# -----------------------------------------------------------------------------
+_RES_CACHE = {}
+
+
+def text_resources():
+    key = TEXT_RESOURCES.stat().st_mtime if TEXT_RESOURCES.exists() else None
+    if key not in _RES_CACHE:
+        import json
+        _RES_CACHE.clear()
+        _RES_CACHE[key] = json.loads(TEXT_RESOURCES.read_text(encoding="utf-8")) if key else {}
+    return _RES_CACHE[key]
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 제목 정규화
+#         clean_title  HTML 엔티티 복원, 뒤에 붙은 " - 출처" / " | 출처" (40자 이하) 제거
+#         cluster_key  근접 중복 키 = 불용어·숫자 뺀 소문자 단어 집합의 해시
+#                      (어순·구두점·출처 꼬리표만 다른 재게시 기사를 같은 이야기로 묶음, w4-2 p17)
+# -----------------------------------------------------------------------------
+def clean_title(s):
+    import html
+    s = s.fillna("").astype(str).map(html.unescape)
+    return s.str.replace(r"\s+[-|–—]\s+[^-|–—]{1,40}$", "", regex=True).str.strip()
+
+
+def cluster_key(titles):
+    toks = titles.str.lower().str.findall(r"[a-z][a-z'&-]+")
+    norm = toks.map(lambda ts: " ".join(sorted({t for t in ts if t not in STOPWORDS})))
+    return pd.util.hash_pandas_object(norm, index=False).to_numpy()
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 기업 연결 정규식
+#         symbol_pattern(s)  그 종목을 가리키는 표현: $TICKER, 대문자 TICKER(일반 단어 티커 제외), alias 이름
+#         _entity_finder     universe·alias 전체 회사 표현 → 제목에 나온 회사 집합 (R2 판정)
+# -----------------------------------------------------------------------------
+def symbol_pattern(sym, aliases):
+    import re
+    parts = [rf"\${re.escape(sym)}\b"]
+    if sym not in COMMON_TICKERS and len(sym) > 2:
+        parts.append(rf"\b{re.escape(sym)}\b")
+    parts += [rf"(?i:(?<!\w){re.escape(a)}(?:'s)?(?!\w))" for a in sorted(aliases.get(sym, []), key=len, reverse=True)]
+    return re.compile("|".join(parts))
+
+
+def _entity_finder(symbols, aliases):
+    pats = {s: symbol_pattern(s, aliases) for s in sorted(set(symbols) | set(aliases))}
+    return lambda title: {s for s, p in pats.items() if p.search(title)}
+
+
+# -----------------------------------------------------------------------------
+# 기능  : LM 금융 사전 점수 (w5-1 p6). 부정어 뒤 3단어 안의 긍정 단어는 부정으로 셈
+# 수식  : lm_net = (n_pos − n_neg) / n_words,  lm_unc = n_uncertainty / n_words
+# input : titles (Series),  lm  {"positive", "negative", "uncertainty"}
+# output: DataFrame[lm_net, lm_unc]  (사전이 없으면 NaN)
+# -----------------------------------------------------------------------------
+def lm_scores(titles, lm):
+    import re
+    if not lm:
+        return pd.DataFrame({"lm_net": np.nan, "lm_unc": np.nan}, index=titles.index)
+    pos, neg, unc = set(lm["positive"]), set(lm["negative"]), set(lm["uncertainty"])
+    rx = re.compile(r"[A-Za-z]+")
+
+    def one(t):
+        w = [x.upper() for x in rx.findall(t)]
+        if not w:
+            return (np.nan, np.nan)
+        p = n = u = 0
+        for i, x in enumerate(w):
+            negated = any(v.lower() in NEGATORS for v in w[max(0, i - 3):i])
+            if x in pos:
+                n, p = (n + 1, p) if negated else (n, p + 1)
+            elif x in neg:
+                n += 1
+            if x in unc:
+                u += 1
+        return ((p - n) / len(w), u / len(w))
+
+    v = np.array([one(t) for t in titles], dtype=float).reshape(-1, 2)
+    return pd.DataFrame({"lm_net": v[:, 0], "lm_unc": v[:, 1]}, index=titles.index)
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 기사 단위 텍스트 표 (정제 + 기업 연결). 집계·연구용 feature(FinBERT·LLM)가 같은 표를 씀
+# input : news  (known_at, symbols, source, title, tone),  targets,  universe,  res (text_resources)
+# output: DataFrame[symbol, target, widx, known_at, source, title, tone, title_id, ckey,
+#                   is_template, rel (0/1/2), n_entities]
+#         title_id = 정규화 제목 해시 (FinBERT·LLM 결과를 붙이는 키),  widx = 대상일 창 번호
+#         rel: 0 태그만, 1 제목에 그 회사 언급, 2 언급된 회사가 그 회사 하나뿐
+# -----------------------------------------------------------------------------
+ARTICLE_COLS = ["symbol", "target", "widx", "known_at", "source", "title", "tone", "title_id", "ckey",
+                "is_template", "rel", "n_entities"]
+
+
+def text_articles(news, targets, universe, res=None):
+    res = res if res is not None else text_resources()
+    aliases = res.get("aliases", {})
+    n = news.assign(symbol=news["symbols"].fillna("").str.split(",")).explode("symbol")
+    n = n[n["symbol"].isin(set(universe))]
+    n = n.assign(target=map_to_target(n["known_at"], targets)).dropna(subset=["target"])
+    if n.empty:
+        return pd.DataFrame(columns=ARTICLE_COLS)
+    n = n.reset_index(drop=True)
+    if "source" not in n.columns:
+        n["source"] = ""
+    n["title"] = clean_title(n["title"])
+    norm = n["title"].str.lower().str.replace(r"[^a-z0-9]+", " ", regex=True).str.strip()
+    n["title_id"] = pd.util.hash_pandas_object(norm, index=False).astype(str).to_numpy()
+    n["ckey"] = cluster_key(n["title"])
+    n["is_template"] = n["title"].str.contains(TEMPLATE_RX, case=False, regex=True).astype(int)
+    tgt = np.sort(targets["target"].astype(NS).unique())
+    n["widx"] = np.searchsorted(tgt, n["target"].to_numpy(NS))
+    rel = np.zeros(len(n), int)
+    for s, idx in n.groupby("symbol").indices.items():
+        rel[idx] = n["title"].iloc[idx].str.contains(symbol_pattern(s, aliases), regex=True).to_numpy().astype(int)
+    find = _entity_finder(universe, aliases)
+    ent = np.zeros(len(n), int)
+    r1 = np.flatnonzero(rel == 1)
+    ent[r1] = [len(find(t)) for t in n["title"].to_numpy()[r1]]
+    rel[r1[ent[r1] <= 1]] = 2
+    n["rel"], n["n_entities"] = rel, ent
+    return n[ARTICLE_COLS].sort_values(["symbol", "known_at", "title_id"], kind="stable").reset_index(drop=True)
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 신규성 (w5-1 p22~23). 오늘 대표 제목이 같은 종목의 직전 NEWS_WINDOW 창 제목과 얼마나 다른가
+# 수식  : novelty = max_{오늘 제목 i} (1 − max_{과거 제목 j} cos(v_i, v_j)),  v = 해싱 TF 벡터(불용어 제외, l2)
+#         과거 제목이 없으면 1. 상태가 없는 해싱 벡터라 학습·predict 가 같은 값을 냄
+# input : reps  대표 기사 (symbol, widx, title), index 0..n-1
+# output: Series index (symbol, widx) → novelty
+# -----------------------------------------------------------------------------
+def _novelty(reps):
+    from sklearn.feature_extraction.text import HashingVectorizer
+    if reps.empty:
+        return pd.Series(dtype=float)
+    hv = HashingVectorizer(n_features=2 ** 18, alternate_sign=False, norm="l2", lowercase=True,
+                           token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z'&-]+\b", stop_words=sorted(STOPWORDS))
+    V = hv.transform(reps["title"])
+    out = {}
+    for s, idx in reps.groupby("symbol", sort=False).indices.items():
+        w = reps["widx"].to_numpy()[idx]
+        for t in np.unique(w):
+            today, past = idx[w == t], idx[(w >= t - NEWS_WINDOW) & (w < t)]
+            if len(past) == 0:
+                out[(s, t)] = 1.0
+                continue
+            sim = (V[today] @ V[past].T).toarray().max(axis=1)
+            out[(s, t)] = float((1 - sim).max())
+    return pd.Series(out, dtype=float)
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 텍스트 feature 를 (종목, 대상일)로 집계
+# 수식  : n_clu_r   = 관련도 ≥ r 인 비템플릿 기사의 클러스터 수 (r0 태그, r1 제목 언급, r2 그 회사만 언급)
+#         n_first_r = 그중 직전 FIRST_LOOKBACK 창에 없던 클러스터 수 (새 이야기)
+#         *_abn     = log(1 + x) − log(1 + 직전 NEWS_WINDOW 창 평균)
+#         R1 대표 기사(클러스터별 첫 기사) 기준으로
+#           tone_mean / tone_neg_share(tone<0 비율) / tone_sd(2개 이상)   ← GDELT tone, 규칙 2개 + 분산
+#           lm_net / lm_neg_share(lm_net<0 비율) / lm_unc                  ← LM 금융 사전
+#           novelty, ev_*(사건 유형 포함 여부), n_scored(대표 기사 수), titles_r1(대표 제목 " || " 연결)
+#         기사가 없으면 count 는 0, 톤·신규성·사건은 NaN (문서 없음 ≠ 중립, w5-1 p19)
+# -----------------------------------------------------------------------------
+def _text_block(news, targets, universe):
+    res = text_resources()
+    a = text_articles(news, targets, universe, res)
+    tgt = np.sort(targets["target"].astype(NS).unique())
+    grid = pd.MultiIndex.from_product([sorted(universe), range(len(tgt))], names=["symbol", "widx"])
+    out = pd.DataFrame(index=grid)
+    nt = a[a["is_template"] == 0]
+    clus = nt.groupby(["symbol", "widx", "ckey"]).agg(rel=("rel", "max")).reset_index()
+    if len(clus):
+        prev = clus[["symbol", "ckey", "widx"]].rename(columns={"widx": "w_prev"})
+        pair = clus.merge(prev, on=["symbol", "ckey"])
+        seen = pair[(pair["w_prev"] < pair["widx"]) & (pair["w_prev"] >= pair["widx"] - FIRST_LOOKBACK)]
+        old = set(zip(seen["symbol"], seen["widx"], seen["ckey"]))
+        clus["is_first"] = [k not in old for k in zip(clus["symbol"], clus["widx"], clus["ckey"])]
+    else:
+        clus["is_first"] = pd.Series(dtype=bool)
+    for i, r in enumerate(RELEVANCE):
+        c = clus[clus["rel"] >= i]
+        out[f"n_clu_{r}"] = c.groupby(["symbol", "widx"]).size().reindex(grid).fillna(0.0)
+        out[f"n_first_{r}"] = c[c["is_first"]].groupby(["symbol", "widx"]).size().reindex(grid).fillna(0.0)
+    g = out.groupby(level="symbol")
+    for r in RELEVANCE:
+        for kind in ("clu", "first"):
+            col = f"n_{kind}_{r}"
+            base = g[col].transform(lambda s: s.shift().rolling(NEWS_WINDOW, min_periods=NEWS_WINDOW).mean())
+            out[f"{col}_abn"] = np.log1p(out[col]) - np.log1p(base)
+    alln = a.groupby(["symbol", "widx"]).agg(n=("is_template", "size"), t=("is_template", "sum"))
+    out["tmpl_share_r0"] = (alln["t"] / alln["n"]).reindex(grid)
+    r1 = nt[nt["rel"] >= 1]
+    out["n_src_r1"] = r1.groupby(["symbol", "widx"])["source"].nunique().reindex(grid).fillna(0.0)
+
+    reps = r1.groupby(["symbol", "widx", "ckey"], sort=False).agg(
+        title=("title", "first"), known_at=("known_at", "first"), tone=("tone", "mean")).reset_index()
+    reps = reps.sort_values(["symbol", "widx", "known_at", "ckey"], kind="stable").reset_index(drop=True)
+    reps = pd.concat([reps, lm_scores(reps["title"], res.get("lm"))], axis=1)
+    low = reps["title"].str.lower()
+    for e, rx in EVENT_RX.items():
+        reps[f"ev_{e}"] = low.str.contains(rx, regex=True).astype(float)
+    k = [reps["symbol"], reps["widx"]]
+    agg = pd.DataFrame({
+        "tone_mean_r1": reps.groupby(k)["tone"].mean(),
+        "tone_neg_share_r1": (reps["tone"] < 0).astype(float).groupby(k).mean(),
+        "tone_sd_r1": reps.groupby(k)["tone"].std(),
+        "lm_net_r1": reps.groupby(k)["lm_net"].mean(),
+        "lm_neg_share_r1": (reps["lm_net"] < 0).astype(float).where(reps["lm_net"].notna()).groupby(k).mean(),
+        "lm_unc_r1": reps.groupby(k)["lm_unc"].mean(),
+        "n_scored_r1": reps.groupby(k).size().astype(float),
+        "titles_r1": reps.groupby(k)["title"].agg(" || ".join),
+        **{f"ev_{e}_r1": reps.groupby(k)[f"ev_{e}"].max() for e in EVENT_RX},
+    })
+    agg.index.names = ["symbol", "widx"]
+    out = out.join(agg)
+    out["novelty_r1"] = _novelty(reps).reindex(grid)
+    out["n_scored_r1"] = out["n_scored_r1"].fillna(0.0)
+    out["ev_any_r1"] = out[[f"ev_{e}_r1" for e in EVENT_RX]].max(axis=1)
+    out["alias_missing"] = (~out.index.get_level_values("symbol").isin(list(res.get("aliases", {})))).astype(float)
+    out = out.reset_index()
+    out["target"] = tgt[out["widx"].to_numpy()]
+    return out.drop(columns="widx")
+
+
 # -----------------------------------------------------------------------------
 # 기능  : 원천 표들로 (종목 × 대상일) feature 표를 만듦. 학습(전체 표)과 predict(하루치 표)가 이 함수를 같이 씀
 # input : tables    {"daily", "price", "earnings"?, "analyst"?, "news"?}  (known_at < cutoff 로 이미 잘린 표)
 #         targets   DataFrame[date, target]  기준일·대상일 쌍 (연속 거래일)
 #         universe  그날 예측 대상 종목 목록. 종목 교차 feature 는 이 안에서만 계산
 # output: DataFrame[symbol, date, target, close_d0, gap_fallback, gap_missing, <FEATURE_GROUPS 열>]
+#         뉴스 표가 있으면 txt_* 묶음(_text_block)도 계산. titles_r1 은 문자열 열
 # 수식  : gap_pct   = (대상일 08:00 pre 봉 종가 / 기준일 종가 − 1) × 100
 #                     pre 봉이 없으면 기준일 post 마지막 종가로 대체(gap_fallback=1), 그것도 없으면 NaN(gap_missing=1)
 #         gap_rank  = 그날 universe 안 gap_pct 순위 (0~1)
@@ -295,8 +575,10 @@ def build_features(tables, targets, universe):
         x = x.merge(_analyst_block(an[an["symbol"].isin(uni)], targets), on=key, how="left")
     if tables.get("news") is not None:
         x = x.merge(_news_block(tables["news"], targets, universe), on=key, how="left")
+        x = x.merge(_text_block(tables["news"], targets, universe), on=key, how="left")
     for c in DEPLOYABLE - set(x.columns):
-        x[c] = np.nan
+        x[c] = "" if c in TEXT_COLS else np.nan
+    x["titles_r1"] = x["titles_r1"].fillna("")
     for c in ("earn", "an_n", "an_up", "an_down"):
         x[c] = x[c].fillna(0.0)
     x["an_gap_agree"] = (np.sign(x["an_up"] - x["an_down"]) * np.sign(x["gap_pct"])).fillna(0.0)
@@ -321,7 +603,7 @@ def day_tables(day, groups):
     if "analyst" in need:
         t["analyst"] = day.analyst(since=since)
     if "news" in need:
-        t["news"] = day.news(days=NEWS_HIST_DAYS, columns=["symbols", "title", "tone"])
+        t["news"] = day.news(days=NEWS_HIST_DAYS, columns=["symbols", "source", "title", "tone"])
     dates = sorted(pd.to_datetime(t["daily"]["date_et"]).dt.normalize().unique())
     dates = [d for d in dates if d <= day.date]
     targets = pd.DataFrame({"date": dates, "target": dates[1:] + [day.target]})
@@ -771,9 +1053,14 @@ DECISIONS = {"flat": FlatRule, "identity": IdentityRule, "k": KRule, "sym2": Sym
 
 class NoRegime:
     """T0. f = 1"""
+    learnable = False
+    inputs = []
 
-    def __init__(self, params=None):
+    def __init__(self, params=None, extra_groups=None):
         self.var = None
+
+    def values(self, X):
+        return None
 
     def fit(self, s, r, y, decision, obj):
         return self
@@ -797,7 +1084,9 @@ class NoRegime:
 # param : var (regime 열 이름, 기본 reg_med_vol20),  f_grid (기본 0.6 ~ 1.6, 0.1 간격)
 # -----------------------------------------------------------------------------
 class TercileRegime:
-    def __init__(self, params=None):
+    learnable = False
+
+    def __init__(self, params=None, extra_groups=None):
         p = dict(params or {})
         self.var = p.get("var", "reg_med_vol20")
         self.grid = np.round(np.arange(*p.get("f_grid", (0.6, 1.61, 0.1))), 3)
@@ -822,6 +1111,13 @@ class TercileRegime:
     def apply(self, s, r):
         return s * self._factor(r)
 
+    @property
+    def inputs(self):
+        return [self.var]
+
+    def values(self, X):
+        return X[self.var].to_numpy(float)
+
     def params(self):
         return {"var": self.var, "edges": [float(e) for e in self.edges], "f": list(self.f)}
 
@@ -839,7 +1135,9 @@ class TercileRegime:
 # param : var,  a_grid (기본 −1.0 ~ 1.0, 0.1 간격)
 # -----------------------------------------------------------------------------
 class LinearRegime:
-    def __init__(self, params=None):
+    learnable = False
+
+    def __init__(self, params=None, extra_groups=None):
         p = dict(params or {})
         self.var = p.get("var", "reg_med_vol20")
         self.grid = np.round(np.arange(*p.get("a_grid", (-1.0, 1.01, 0.1))), 3)
@@ -857,6 +1155,13 @@ class LinearRegime:
         self.alpha = float(max(self.grid, key=lambda a: obj(y, decision.predict(self._with(a).apply(s, r)))))
         return self
 
+    @property
+    def inputs(self):
+        return [self.var]
+
+    def values(self, X):
+        return X[self.var].to_numpy(float)
+
     def _with(self, a):
         c = LinearRegime({"var": self.var})
         c.med, c.iqr, c.alpha = self.med, self.iqr, a
@@ -873,7 +1178,125 @@ class LinearRegime:
         return self
 
 
-REGIMES = {"none": NoRegime, "tercile": TercileRegime, "linear": LinearRegime}
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 텍스트 vectorizer 후보 (T5 ablation). 이름 → sklearn 변환기
+#         count_uni   단어 1-gram 개수               tfidf_uni   단어 1-gram TF-IDF (sublinear)
+#         tfidf_bi    단어 1~2-gram TF-IDF           tfidf_char  문자 3~5-gram (단어 경계) TF-IDF
+#         tfidf_stop  tfidf_uni + 불용어 제거 (부정어는 남김)
+#         tfidf_df    tfidf_uni + min_df 20, max_df 0.5 (희귀·흔한 단어 가지치기, w4-2 p25)
+#         lm_vocab    LM 금융 사전 단어만 어휘로 쓰는 개수 벡터 (사전이 없으면 오류)
+#         hashing     상태 없는 해싱 TF (어휘 학습 없음)
+#         공통: 소문자화는 vectorizer 안에서만, 토큰 규칙은 $·%·숫자를 보존 (w4-2 p18, p21)
+# input : name, params {min_df, max_df}
+# output: sklearn vectorizer
+# -----------------------------------------------------------------------------
+VEC_TOKEN = r"(?u)\$?[A-Za-z]+(?:[.'&-][A-Za-z]+)*|\d+(?:[.,]\d+)*%?"
+
+
+def make_vectorizer(name, params=None):
+    from sklearn.feature_extraction.text import CountVectorizer, HashingVectorizer, TfidfVectorizer
+    p = dict(params or {})
+    mn, mx = p.get("min_df", 5), p.get("max_df", 1.0)
+    word = dict(token_pattern=VEC_TOKEN, lowercase=True, min_df=mn, max_df=mx)
+    stop = sorted(STOPWORDS - NEGATORS)
+    if name == "count_uni":
+        return CountVectorizer(**word)
+    if name == "tfidf_uni":
+        return TfidfVectorizer(sublinear_tf=True, **word)
+    if name == "tfidf_bi":
+        return TfidfVectorizer(sublinear_tf=True, ngram_range=(1, 2), **word)
+    if name == "tfidf_char":
+        return TfidfVectorizer(sublinear_tf=True, analyzer="char_wb", ngram_range=(3, 5), min_df=mn, max_df=mx)
+    if name == "tfidf_stop":
+        return TfidfVectorizer(sublinear_tf=True, stop_words=stop, **word)
+    if name == "tfidf_df":
+        return TfidfVectorizer(sublinear_tf=True, **{**word, "min_df": p.get("min_df", 20), "max_df": p.get("max_df", 0.5)})
+    if name == "lm_vocab":
+        lm = text_resources().get("lm")
+        if not lm:
+            raise ValueError("lm_vocab: artifacts/text_resources.json 에 LM 사전이 없음 (python -m exp text resources)")
+        vocab = sorted({w.lower() for k in ("positive", "negative", "uncertainty") for w in lm[k]})
+        return CountVectorizer(token_pattern=VEC_TOKEN, lowercase=True, vocabulary=vocab)
+    if name == "hashing":
+        return HashingVectorizer(token_pattern=VEC_TOKEN, lowercase=True, n_features=2 ** 18, alternate_sign=False)
+    raise ValueError(f"vectorizer '{name}' 없음. 가능: count_uni tfidf_uni tfidf_bi tfidf_char tfidf_stop tfidf_df lm_vocab hashing")
+
+
+# -----------------------------------------------------------------------------
+# 기능  : T2~T5. 텍스트로 "오늘 이 종목이 급등락할 확률"을 학습하고, 그 확률의 삼분위로 갭 신호의 크기 배율을 정함
+#         방향(부호)은 갭 그대로. 텍스트는 크기 판단만 바꿈 (docs/text_pipeline.md 3.7)
+# 구성  : prefit  학습 구간 앞부분(fit)으로 분류기 학습      → P(M=1 | 텍스트)
+#         fit     학습 구간 뒷부분(tune)으로 삼분위 배율 결정  (TercileRegime 과 같음)
+# input : params
+#         input       "text"    titles_r1 문자열 → vectorizer → 로지스틱 회귀
+#                     "columns" 숫자 열 목록 → 결측 중앙값 대체 → 표준화 → 로지스틱 회귀
+#         vectorizer  make_vectorizer 이름 (input="text")
+#         columns     열 이름 또는 묶음 이름 목록 (input="columns")
+#         C           로지스틱 회귀 규제 (기본 1.0),  min_df / max_df,  f_grid (배율 후보)
+# 목표  : M = 1[label ∈ {0, 4}]   (급등락 여부)
+# loss  : class_weight="balanced" 로지스틱 log loss (급등락이 17% 라 불균형 보정)
+# output: values(X) = P(M=1 | 텍스트). 텍스트가 없는 행은 NaN → 가운데 삼분위(배율 1)
+# -----------------------------------------------------------------------------
+class TextModelRegime(TercileRegime):
+    learnable = True
+
+    def __init__(self, params=None, extra_groups=None):
+        p = dict(params or {})
+        super().__init__(p)
+        self.input = p.get("input", "text")
+        self.vec_name = p.get("vectorizer", "tfidf_uni")
+        self.vec_params = {k: p[k] for k in ("min_df", "max_df") if k in p}
+        self.C = float(p.get("C", 1.0))
+        self.cols = (resolve_features(p.get("columns", []), extra_groups) if self.input == "columns" else ["titles_r1"])
+        self.var = f"textclf:{self.input}:{self.vec_name if self.input == 'text' else '+'.join(self.cols)}"
+        self.model = None
+
+    @property
+    def inputs(self):
+        return list(self.cols)
+
+    def prefit(self, F, seed=0):
+        from sklearn.impute import SimpleImputer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        y = np.isin(F["label"].to_numpy(int), (0, 4)).astype(int)
+        clf = LogisticRegression(C=self.C, class_weight="balanced", max_iter=2000, random_state=seed)
+        if self.input == "text":
+            m = F["titles_r1"].fillna("").str.len().to_numpy() > 0
+            self.model = make_pipeline(make_vectorizer(self.vec_name, self.vec_params), clf)
+            self.model.fit(F["titles_r1"].to_numpy()[m], y[m])
+        else:
+            self.model = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), clf)
+            self.model.fit(F[self.cols].to_numpy(float), y)
+        return self
+
+    def values(self, X):
+        if self.input == "text":
+            t = X["titles_r1"].fillna("").to_numpy()
+            out = np.full(len(X), np.nan)
+            m = np.array([len(s) > 0 for s in t], bool)
+            if m.any():
+                out[m] = self.model.predict_proba(t[m])[:, 1]
+            return out
+        return self.model.predict_proba(X[self.cols].to_numpy(float))[:, 1]
+
+    def params(self):
+        return {**super().params(), "input": self.input, "vectorizer": self.vec_name, "columns": self.cols, "C": self.C}
+
+    def state(self):
+        return {**super().state(), "model": self.model, "input": self.input, "vec_name": self.vec_name,
+                "cols": self.cols, "C": self.C}
+
+    def load(self, st):
+        super().load(st)
+        self.model, self.input, self.vec_name, self.cols, self.C = st["model"], st["input"], st["vec_name"], st["cols"], st["C"]
+        return self
+
+
+REGIMES = {"none": NoRegime, "tercile": TercileRegime, "linear": LinearRegime, "textclf": TextModelRegime}
 
 
 # =============================================================================
@@ -914,15 +1337,16 @@ class Pipeline:
     # -------------------------------------------------------------------------
     def __init__(self, spec, extra_groups=None):
         self.spec = validate_spec(spec)
+        self.extra_groups = dict(extra_groups or {})
         sig = self.spec["signal"]
         feats = resolve_features(sig.get("features", ["core"]), extra_groups)
         self.signal = SIGNALS[sig["type"]](feats, sig.get("params"))
         self.decision = DECISIONS[self.spec["decision"]["type"]](self.spec["decision"].get("params"))
-        self.regime = REGIMES[self.spec["regime"]["type"]](self.spec["regime"].get("params"))
+        self.regime = REGIMES[self.spec["regime"]["type"]](self.spec["regime"].get("params"), extra_groups)
 
     @property
     def features(self):
-        return list(self.signal.features) + ([self.regime.var] if self.regime.var else [])
+        return list(dict.fromkeys(list(self.signal.features) + list(self.regime.inputs)))
 
     @property
     def groups(self):
@@ -932,13 +1356,16 @@ class Pipeline:
     def deployable(self):
         return set(self.features) <= DEPLOYABLE
 
-    def _split(self, X):
+    def _time_split(self, X):
         t = X["target"].to_numpy(NS)
-        if not self.signal.learnable and self.spec["tune_on"] == "auto":
-            return np.zeros(len(X), bool), np.ones(len(X), bool)
         edge = np.quantile(np.unique(t).astype("int64"), 1 - float(self.spec["tune_frac"]))
         tune = t.astype("int64") > edge
         return ~tune, tune
+
+    def _split(self, X):
+        if not self.signal.learnable and self.spec["tune_on"] == "auto":
+            return np.zeros(len(X), bool), np.ones(len(X), bool)
+        return self._time_split(X)
 
     # -------------------------------------------------------------------------
     # 기능  : 학습. X 는 feature + 정답(label, ret_pct) 을 가진 패널
@@ -957,8 +1384,15 @@ class Pipeline:
         obj = Objective(self.spec["selection"], T["target"])
         s = self.signal.predict(T)
         self.decision.fit(s, y, obj)
-        if self.regime.var:
-            self.regime.fit(s, T[self.regime.var].to_numpy(float), y, self.decision, obj)
+        if self.regime.var and self.regime.learnable:
+            # 학습형 regime(텍스트 분류기): 앞부분으로 분류기, 뒷부분으로 배율. 결정 규칙은 위에서 이미 고정
+            rf, rt = self._time_split(X)
+            self.regime.prefit(X[rf], seed)
+            R = X[rt]
+            self.regime.fit(self.signal.predict(R), self.regime.values(R), R["label"].to_numpy(int),
+                            self.decision, Objective(self.spec["selection"], R["target"]))
+        elif self.regime.var:
+            self.regime.fit(s, self.regime.values(T), y, self.decision, obj)
         self.fit_info = {"n_fit": int(fit_m.sum()), "n_tune": int(tune_m.sum()),
                          "tune_from": str(T["target"].min().date()) if len(T) else None}
         return self
@@ -970,7 +1404,7 @@ class Pipeline:
     def predict(self, X):
         s = self.signal.predict(X)
         if self.regime.var:
-            s = self.regime.apply(s, X[self.regime.var].to_numpy(float))
+            s = self.regime.apply(s, self.regime.values(X))
         return self.decision.predict(s)
 
     def params(self):
@@ -981,7 +1415,8 @@ class Pipeline:
     # 기능  : 저장·복원. 클래스가 아니라 spec 과 학습 결과(sklearn 객체·숫자)만 저장함
     # -------------------------------------------------------------------------
     def state(self):
-        return {"format": ARTIFACT_FORMAT, "spec": self.spec, "signal": self.signal.state(),
+        return {"format": ARTIFACT_FORMAT, "spec": self.spec, "extra_groups": self.extra_groups,
+                "signal": self.signal.state(),
                 "decision": self.decision.state(), "regime": self.regime.state(),
                 "params": self.params()}
 
@@ -989,7 +1424,7 @@ class Pipeline:
     def from_state(cls, st):
         if st.get("format") != ARTIFACT_FORMAT:
             raise ValueError(f"artifact format {st.get('format')} != {ARTIFACT_FORMAT}")
-        p = cls(st["spec"])
+        p = cls(st["spec"], st.get("extra_groups"))
         p.signal.load(st["signal"])
         p.decision.load(st["decision"])
         p.regime.load(st["regime"])

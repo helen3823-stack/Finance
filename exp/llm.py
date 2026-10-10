@@ -2,6 +2,7 @@
 
 기능  : 뉴스 제목 / Reddit 글을 LLM 으로 구조화하고, 그 결과가 갭 이후 움직임을 설명하는지 볼 feature 를 만듦
 구성  : SCHEMAS·SYSTEM (출력 형식·지시문) · anonymize() · sample_news() · sample_reddit()
+        · run_label() (silver label, 프롬프트 3종) · run_placebo() (시점 맞히기)
         · call() (캐시) · run_llm()
 역할  : LLM 은 "주가에 좋은가"를 판단하지 않고 사실만 추출하는 parser 로만 씀. 방향 부호는 코드가 규칙으로 계산
         누수 통제: 회사명·티커·날짜를 지운 익명 입력(anon)과 원문 입력(raw)을 둘 다 돌려 비교
@@ -108,24 +109,22 @@ def _dev_panel(cfg):
 
 # -----------------------------------------------------------------------------
 # 기능  : 갭 층화 뉴스 표본
-# 방법  : 대상일 창 안의 기사를 정규화 제목으로 중복 제거하고, (종목, 대상일)마다 가장 많이 반복된 제목을 대표로 고름
+# 방법  : 텍스트 파이프라인의 기사 표에서 관련도 R1 이상·비템플릿 기사만 씀 (태그만 붙은 무관한 기사 제외)
+#         (종목, 대상일)마다 가장 많이 재게시된 클러스터의 첫 제목을 대표로 고름
 #         |gap| 층 (small < 0.5, medium < 1.5, large ≥ 1.5 %) × 갭 부호 6칸에서 n_per_stratum 개씩 무작위 추출
 # input : cfg [llm] n_per_stratum, seed
 #         max_calls는 신규 item 처리 수 기준이며 retry 횟수는 별도
 # output: DataFrame[symbol, target, text]  (universe ticker가 하나만 언급된 댓글만 사용)
 # -----------------------------------------------------------------------------
 def sample_news(cfg):
+    from .text import articles, lockbox_safe
     L = cfg["llm"]
-    n = load_tables(with_news=True)["news"]
     x = _dev_panel(cfg)
-    n = n.assign(symbol=n["symbols"].fillna("").str.split(",")).explode("symbol")
-    n = n[n["symbol"].isin(set(x["symbol"]))]
-    n = n.assign(target=map_to_target(n["known_at"], calendar())).dropna(subset=["target"])
-    n["norm"] = n["title"].fillna("").str.lower().str.replace(r"[^a-z0-9]+", " ", regex=True).str.strip()
-    n = n[n["norm"].str.len() > 0]
-    cnt = n.groupby(["symbol", "target", "norm"]).agg(dups=("title", "size"), title=("title", "first"),
+    a = lockbox_safe(articles())
+    a = a[(a["rel"] >= 1) & (a["is_template"] == 0)]
+    cnt = a.groupby(["symbol", "target", "ckey"]).agg(dups=("title", "size"), title=("title", "first"),
                                                        first=("known_at", "min")).reset_index()
-    rep = cnt.sort_values(["dups", "first"], ascending=[False, True]).drop_duplicates(["symbol", "target"])
+    rep = cnt.sort_values(["dups", "first", "ckey"], ascending=[False, True, True]).drop_duplicates(["symbol", "target"])
     rep = rep.merge(x, on=["symbol", "target"]).dropna(subset=["gap_pct"])
     size = pd.cut(rep["gap_pct"].abs(), [0, 0.5, 1.5, np.inf], right=False, labels=["small", "medium", "large"])
     rep["stratum"] = size.astype(str) + np.where(rep["gap_pct"] >= 0, "_pos", "_neg")
@@ -588,11 +587,179 @@ def _reddit_row(r):
     }
 
 
+# =============================================================================
+# LLM silver label (수작업 라벨 대신) · placebo 시점 테스트
+# =============================================================================
+# 라벨 스키마: 대상 회사 관련도 + 투자자 관점 극성 (w5-1 p11, p20 entity-level)
+_LABEL_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["relevance", "polarity", "confidence"],
+    "properties": {
+        "relevance": {"type": "string", "enum": ["about_target", "mentions_target", "not_about_target"]},
+        "polarity": {"type": "string", "enum": ["positive", "neutral", "negative"]},
+        "confidence": {"type": "integer", "enum": [1, 2, 3]},
+    },
+}
+# 프롬프트 민감도 (w5-1 p38): 같은 과제를 문구만 다르게 3가지로 물음
+_LABEL_SYSTEMS = [
+    ("Label one financial news headline for the company written as [TARGET]. relevance: about_target if the "
+     "headline is mainly about [TARGET], mentions_target if [TARGET] is only mentioned, not_about_target otherwise. "
+     "polarity: from an investor's perspective on [TARGET], is the reported information positive, neutral or negative? "
+     "Judge only what the headline says. [OTHER] marks other companies and [DATE] marks dates."),
+    ("You are annotating headlines for a finance dataset. Target company = [TARGET]; other companies = [OTHER]. "
+     "Decide whether the headline is about the target (about_target), merely mentions it (mentions_target) or is not "
+     "about it (not_about_target). Then give the news polarity for a shareholder of the target: positive, neutral or "
+     "negative. Use only the headline text."),
+    ("Headline classification. Step 1, relevance of [TARGET] — about_target / mentions_target / not_about_target. "
+     "Step 2, would a [TARGET] investor read this as good (positive), bad (negative) or neither (neutral) news? "
+     "Ignore your knowledge of later events; read the words only. confidence 1 = unsure, 3 = clear."),
+]
+for _i, _s in enumerate(_LABEL_SYSTEMS, 1):
+    SCHEMAS[f"headline_label_v{_i}"] = _LABEL_SCHEMA
+    SYSTEM[f"headline_label_v{_i}"] = _s
+# placebo (w5-1 p37): 제목만 보고 시점을 맞히면 모델이 사건을 기억하고 있다는 신호
+SCHEMAS["date_guess"] = {
+    "type": "object", "additionalProperties": False, "required": ["year", "month"],
+    "properties": {"year": {"type": "integer"}, "month": {"type": "integer"}},
+}
+SYSTEM["date_guess"] = ("Guess when this news headline was published. Answer year (e.g. 2025) and month (1-12). "
+                        "If you cannot tell, answer year 0 and month 0.")
+
+
+# -----------------------------------------------------------------------------
+# 기능  : 라벨용 익명화. 대상 회사 → [TARGET], 다른 회사 → [OTHER], 날짜 → [DATE]
+# input : title, sym (대상 티커), aliases
+# -----------------------------------------------------------------------------
+def anonymize_target(title, sym, aliases):
+    from src.model import symbol_pattern
+    out = symbol_pattern(sym, aliases).sub("[TARGET]", title)
+    for other in aliases:
+        if other != sym:
+            out = symbol_pattern(other, aliases).sub("[OTHER]", out)
+    return re.sub(r"\s+", " ", _DATE_RX.sub("[DATE]", out)).strip()
+
+
+def _label_sample(cfg, L):
+    from .text import articles, lockbox_safe
+    a = lockbox_safe(articles())
+    a = a[a["is_template"] == 0].drop_duplicates(["symbol", "title_id"])
+    rng = np.random.default_rng(C.derive_seed(cfg["seed"], "llm_label"))
+    k = int(L.get("label_per_tier", 100))
+    pick = []
+    for rel, g in a.groupby("rel", sort=True):
+        pick.append(g.iloc[np.sort(rng.choice(len(g), min(k, len(g)), replace=False))])
+    return pd.concat(pick, ignore_index=True)
+
+
+# -----------------------------------------------------------------------------
+# 기능  : silver label 만들기와 평가
+#         1) 관련도 R0/R1/R2 층에서 같은 수씩 표본 → 2) 3가지 프롬프트로 라벨 → 3) 다수결 silver label
+#         4) 평가: 기업 연결(R1/R2)의 정밀도·재현율, 톤 측정(GDELT·LM·FinBERT)의 클래스별 recall,
+#            프롬프트 간 일치율 (silver label 은 정답이 아니라 또 하나의 측정 도구임)
+# output: label_items.csv, label_eval.json
+# -----------------------------------------------------------------------------
+def run_label(cfg, L, client, out, budget, pending):
+    from src.model import lm_scores, text_resources
+    aliases = _aliases()
+    s = _label_sample(cfg, L)
+    s["input"] = [anonymize_target(t, sym, aliases) for t, sym in zip(s["title"], s["symbol"])]
+    for i in range(1, len(_LABEL_SYSTEMS) + 1):
+        res = []
+        for text in s["input"]:
+            r, hit = call(f"headline_label_v{i}", text, L, client if budget[0] > 0 else None)
+            if not hit and client is not None and budget[0] > 0:
+                budget[0] -= 1
+            if r is None and not hit:
+                pending.append({"schema": f"headline_label_v{i}", "text": text})
+            res.append(r or {})
+        s[f"rel_v{i}"] = [r.get("relevance") for r in res]
+        s[f"pol_v{i}"] = [r.get("polarity") for r in res]
+    vs = [f"pol_v{i}" for i in range(1, len(_LABEL_SYSTEMS) + 1)]
+    rs = [f"rel_v{i}" for i in range(1, len(_LABEL_SYSTEMS) + 1)]
+    mode = lambda row: pd.Series(row).dropna().mode().iloc[0] if pd.Series(row).notna().any() else None
+    s["pol_silver"] = s[vs].apply(lambda r: mode(r.values), axis=1)
+    s["rel_silver"] = s[rs].apply(lambda r: mode(r.values), axis=1)
+    s["lm_net"] = lm_scores(s["title"], text_resources().get("lm"))["lm_net"]
+    s["pol_gdelt"] = np.select([s["tone"] > 1, s["tone"] < -1], ["positive", "negative"], "neutral")
+    s["pol_lm"] = np.select([s["lm_net"] > 0, s["lm_net"] < 0], ["positive", "negative"],
+                            np.where(s["lm_net"].isna(), None, "neutral"))
+    try:
+        from .text import FINBERT_SCORES
+        fb = pd.read_parquet(FINBERT_SCORES, columns=["title_id", "p_pos", "p_neg", "p_neu"])
+        s = s.merge(fb, on="title_id", how="left")
+        s["pol_finbert"] = s[["p_pos", "p_neg", "p_neu"]].idxmax(axis=1).map(
+            {"p_pos": "positive", "p_neg": "negative", "p_neu": "neutral"})
+    except (FileNotFoundError, KeyError, ValueError):
+        s["pol_finbert"] = None
+    s.to_csv(out / "label_items.csv", index=False)
+
+    ev = {"n": len(s), "labeled": int(s["pol_silver"].notna().sum())}
+    lab = s[s["pol_silver"].notna()]
+    if len(lab):
+        pairs = [(a, b) for i, a in enumerate(vs) for b in vs[i + 1:]]
+        ev["prompt_agreement_polarity"] = {f"{a}~{b}": float((lab[a] == lab[b]).mean()) for a, b in pairs}
+        ev["prompt_agreement_relevance"] = {f"{a}~{b}": float((lab[a] == lab[b]).mean())
+                                            for a, b in [(x.replace("pol", "rel"), y.replace("pol", "rel")) for x, y in pairs]}
+        about = lab["rel_silver"] == "about_target"
+        for r in (1, 2):
+            pred = lab["rel"] >= r
+            ev[f"entity_R{r}_precision"] = float(about[pred].mean()) if pred.any() else None
+            ev[f"entity_R{r}_recall"] = float(pred[about].mean()) if about.any() else None
+        rel_ok = lab[lab["rel_silver"] != "not_about_target"]
+        for m in ("pol_gdelt", "pol_lm", "pol_finbert"):
+            d = rel_ok[rel_ok[m].notna()]
+            if len(d):
+                ev[m] = {"n": len(d), "accuracy": float((d[m] == d["pol_silver"]).mean()),
+                         "recall_by_class": {c: float((d.loc[d["pol_silver"] == c, m] == c).mean())
+                                             for c in ("positive", "neutral", "negative") if (d["pol_silver"] == c).any()}}
+        ev["silver_class_share"] = rel_ok["pol_silver"].value_counts(normalize=True).round(3).to_dict()
+    (out / "label_eval.json").write_text(json.dumps(ev, indent=2, ensure_ascii=False), encoding="utf-8")
+    return ev
+
+
+# -----------------------------------------------------------------------------
+# 기능  : placebo 시점 테스트. R1 제목을 원문/익명 두 번 주고 연·월을 맞히게 함
+#         원문에서만 정확도가 높으면 회사·사건을 기억하고 있다는 뜻 → 오염 위험 (w5-1 p35~37)
+# output: placebo_items.csv, placebo_eval.json
+# -----------------------------------------------------------------------------
+def run_placebo(cfg, L, client, out, budget, pending):
+    from .text import articles, lockbox_safe
+    a = lockbox_safe(articles())
+    a = a[(a["is_template"] == 0) & (a["rel"] >= 1)].drop_duplicates("title_id")
+    rng = np.random.default_rng(C.derive_seed(cfg["seed"], "llm_placebo"))
+    s = a.iloc[np.sort(rng.choice(len(a), min(int(L.get("placebo_n", 100)), len(a)), replace=False))].copy()
+    aliases = _aliases()
+    when = pd.to_datetime(s["known_at"])
+    ev = {"n": len(s)}
+    for v in ("raw", "anon"):
+        texts = s["title"] if v == "raw" else [anonymize(t, aliases) for t in s["title"]]
+        res = []
+        for text in texts:
+            r, hit = call("date_guess", text, L, client if budget[0] > 0 else None)
+            if not hit and client is not None and budget[0] > 0:
+                budget[0] -= 1
+            if r is None and not hit:
+                pending.append({"schema": "date_guess", "variant": v, "text": text})
+            res.append(r or {})
+        s[f"year_{v}"] = [r.get("year") for r in res]
+        s[f"month_{v}"] = [r.get("month") for r in res]
+        ok = s[f"year_{v}"].notna()
+        if ok.any():
+            ev[v] = {"answered": int(ok.sum()),
+                     "year_acc": float((s.loc[ok, f"year_{v}"] == when[ok].dt.year).mean()),
+                     "year_month_acc": float(((s.loc[ok, f"year_{v}"] == when[ok].dt.year)
+                                              & (s.loc[ok, f"month_{v}"] == when[ok].dt.month)).mean())}
+    s.to_csv(out / "placebo_items.csv", index=False)
+    (out / "placebo_eval.json").write_text(json.dumps(ev, indent=2), encoding="utf-8")
+    return ev
+
+
 # -----------------------------------------------------------------------------
 # 기능  : E4-L 실행
 #         1) 표본 추출 → 2) 변형(anon / raw)별 입력 → 3) 캐시 또는 API → 4) feature parquet 저장
 #         5) 요약: anon·raw 부호 일치율, 부호 × 갭 방향별 rest 평균 (누수 의심 지표)
-# input : cfg [llm] model, effort, dry_run, max_calls, kinds(["news", "reddit"]), variants(["anon", "raw"]) ...
+# input : cfg [llm] model, effort, dry_run, max_calls, kinds(["news", "reddit", "label", "placebo"]),
+#         variants(["anon", "raw"]), label_per_tier, placebo_n ...
 # output: 결과 폴더 runs/<name>_<hash>_llm/
 # -----------------------------------------------------------------------------
 def run_llm(cfg):
@@ -675,6 +842,12 @@ def run_llm(cfg):
             )
         summary[f"{schema}/{v}"] = {"items": len(s), "parsed": int(sum(r is not None for r in res))}
 
+    box = [budget]
+    if "label" in L["kinds"]:
+        summary["label"] = run_label(cfg, L, client, out, box, pending)
+    if "placebo" in L["kinds"]:
+        summary["placebo"] = run_placebo(cfg, L, client, out, box, pending)
+    budget = box[0]
     if {"news_event/anon", "news_event/raw"} <= set(summary):
         a = pd.read_parquet(C.CACHE / "llm_features_anon.parquet")
         b = pd.read_parquet(C.CACHE / "llm_features_raw.parquet")

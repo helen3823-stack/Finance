@@ -4,7 +4,8 @@
         g0()  제출 경로의 하루 예측 시간과 LLM 사용 조건을 점검
 구성  : e0() · g0() · _save()
 역할  : 실험 결과를 믿을 수 있는지(E0), 제출 환경에서 돌아가는지(G0)를 실험 전에 확인
-통과 기준 (E0): label 불일치 0, feature 최대 절대오차 < 1e-9, NaN 위치 일치, 대상일 pre 봉에 09:00 봉 없음
+통과 기준 (E0): label 불일치 0, feature 최대 절대오차 < 1e-9, NaN 위치 일치, 문자열 열(titles_r1) 일치,
+                대상일 pre 봉에 09:00 봉 없음
 """
 
 import json
@@ -15,14 +16,15 @@ import numpy as np
 import pandas as pd
 
 from src.data import Dataset
-from src.model import DEPLOYABLE, Model, day_features, day_tables, groups_of, resolve_features
+from src.model import DEPLOYABLE, TEXT_COLS, Model, day_features, day_tables, groups_of, resolve_features
 
 from . import config as C
 from .lockbox import LOCKBOX_START
 from .panel import calendar, universe_panel
 from .splits import universe_draws
 
-ALL_GROUPS = ["core", "scale", "cross", "event", "analyst", "news", "regime"]
+ALL_GROUPS = ["core", "scale", "cross", "event", "analyst", "news", "regime",
+              "txt_count", "txt_tone_gdelt", "txt_tone_lm", "txt_novelty", "txt_event", "txt_meta", "txt_text"]
 
 
 def _save(name, obj):
@@ -45,7 +47,8 @@ def e0(n_days=8, seed=20261005, groups=ALL_GROUPS):
     uni = universe_draws(sorted(pd.read_parquet(C.ROOT / "dataset" / "daily.parquet", columns=["symbol"])["symbol"].unique()),
                          cfg, seed)[0]["test_universe"]
     panel = universe_panel(uni, groups)
-    cols = sorted(set(resolve_features(groups)) & DEPLOYABLE)
+    cols = sorted((set(resolve_features(groups)) & DEPLOYABLE) - TEXT_COLS)
+    tcols = sorted(set(resolve_features(groups)) & TEXT_COLS)
     cal = calendar()
     cal = cal[cal["target"] < LOCKBOX_START]          # 점검도 DEV 날짜만 (정답 비교가 있어서)
     rng = np.random.default_rng(C.derive_seed(seed, "e0"))
@@ -60,17 +63,19 @@ def e0(n_days=8, seed=20261005, groups=ALL_GROUPS):
         nan_mismatch = int((np.isnan(a) != np.isnan(b)).sum())
         diff = np.nanmax(np.abs(np.where(np.isnan(a) | np.isnan(b), 0, a - b)))
         worst = cols[int(np.nanargmax(np.nanmax(np.abs(np.nan_to_num(a - b)), axis=0)))] if diff > 0 else None
+        text_mis = int(sum((x[c].fillna("") != p[c].fillna("")).sum() for c in tcols))
         y = day.y.set_index("symbol")["label"].astype(int)
         lab_mis = int((p["label"].astype(int) != y.reindex(p.index)).sum())
         tables, _ = day_tables(day, {"core"})
         pr = tables["price"]
         pre_t = pr[(pr["session"] == "pre") & (pd.to_datetime(pr["datetime"]).dt.normalize() == pd.Timestamp(day.target))]
         bar9 = int((pd.to_datetime(pre_t["datetime"]).dt.hour >= 9).sum())
-        good = lab_mis == 0 and diff < 1e-9 and nan_mismatch == 0 and bar9 == 0 and len(x) == len(uni)
+        good = lab_mis == 0 and diff < 1e-9 and nan_mismatch == 0 and bar9 == 0 and len(x) == len(uni) and text_mis == 0
         ok &= good
         rows.append({"date": str(day.date.date()), "target": str(day.target.date()), "n": len(x),
                      "label_mismatch": lab_mis, "max_abs_diff": float(diff), "worst_col": worst,
-                     "nan_mismatch": nan_mismatch, "pre_bars_at_or_after_09": bar9, "pass": good})
+                     "nan_mismatch": nan_mismatch, "text_mismatch": text_mis, "pre_bars_at_or_after_09": bar9,
+                     "pass": good})
     res = {"pass": bool(ok), "universe": uni, "columns": cols, "days": rows}
     print(pd.DataFrame(rows).to_string(index=False))
     print(f"[E0] {'통과' if ok else '실패'} → {_save('e0', res)}")

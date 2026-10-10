@@ -1,0 +1,24 @@
+# T6 — LLM 연구 (w5-1 p29~38, w6-1 p24~40)
+#   label   : 수작업 라벨 대신 LLM silver label. 관련도(R0/R1/R2) 층별 표본 × 프롬프트 3종 → 다수결
+#             평가: 기업 연결 정밀도·재현율, GDELT·LM·FinBERT 톤의 클래스별 recall, 프롬프트 간 일치율
+#   placebo : 제목만 보고 연·월 맞히기 (원문 vs 익명). 원문에서만 잘 맞히면 사전 지식 오염 의심
+#   news    : 사건 파서 (익명 vs 원문), E4-L 과 같음
+# 기본 dry_run = true: API 를 부르지 않고 보낼 입력만 pending.jsonl 에 저장
+# 대략 호출 수 (dry_run 결과의 pending_calls 로 확인): label 300 × 3 = 900, placebo 100 × 2 = 200, news 300 × 2 = 600
+# silver label 은 정답이 아니라 또 하나의 측정 도구임 (보고서에 그렇게 씀)
+# 실행: python -m exp llm configs/t6_llm.toml
+
+name = "t6_llm"
+stage = "T6"
+seed = 20261005
+
+[llm]
+model = "claude-opus-5-5"
+effort = "low"
+dry_run = true
+max_calls = 2000
+kinds = ["label", "placebo", "news"]
+variants = ["anon", "raw"]
+label_per_tier = 100            # 관련도 R0 / R1 / R2 층마다
+placebo_n = 100
+n_per_stratum = 50
